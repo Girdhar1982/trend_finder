@@ -2,7 +2,7 @@
 
 **A non-repainting MetaTrader 5 signal system built on statistics with known null distributions.**
 
-Version 1.11 (indicator) · 1.00 (EA) · Last updated 2026-08-25
+Version 1.11 (indicator) · 1.10 (EA) · Last updated 2026-08-27
 
 ---
 
@@ -72,11 +72,17 @@ These feed a regime classifier, a multi-timeframe confluence filter, a logistic 
                          │ iCustom + CopyBuffer (shift 1)
                          ▼
 ┌──────────────────────────────────────────────────────────┐
-│  QuantRegimeConfluenceEA.mq5        (MQL5\Experts\)      │
+│  QuantRegimeConfluenceEA*.mq5         (MQL5\Experts\)    │
 │  ─────────────────────────────────────────────────────   │
 │  EXECUTION ONLY. No signal logic whatsoever.             │
 │                                                          │
-│   Position sizing · broker compliance · margin check     │
+│   Three thin wrappers around ONE shared core             │
+│   (QuantRegimeConfluenceEA_Core.mqh):                    │
+│     QuantRegimeConfluenceEA.mq5        generic profile   │
+│     QuantRegimeConfluenceEA_Forex.mq5  M15+, Fri cutoff  │
+│     QuantRegimeConfluenceEA_Crypto.mq5 H1+, 24/7         │
+│                                                          │
+│   Position sizing · margin check · broker compliance     │
 │   Break-even + trailing in R · session/loss guards       │
 └──────────────────────────────────────────────────────────┘
 
@@ -103,7 +109,12 @@ Files belong in your terminal's data folder (**File → Open Data Folder** in MT
 |---|---|
 | `QuantRegimeConfluence.mq5` | `MQL5\Indicators\` |
 | `QuantRegimeConfluenceEA.mq5` | `MQL5\Experts\` |
+| `QuantRegimeConfluenceEA_Forex.mq5` | `MQL5\Experts\` |
+| `QuantRegimeConfluenceEA_Crypto.mq5` | `MQL5\Experts\` |
+| `QuantRegimeConfluenceEA_Core.mqh` | `MQL5\Experts\` |
 | `QRC_SelfTest.mq5` | `MQL5\Scripts\` |
+
+The three EA files are thin wrappers over one shared core; **compile the wrapper you intend to trade** (each is its own `.ex5`). The generic one keeps the original defaults; `_Forex` adds a late-Friday cut-off; `_Crypto` uses a wider spread guard, a higher minimum timeframe and a looser daily-loss cap. See [§13](#13-input-reference--ea) for the full profile table.
 
 Compile each (F7 in MetaEditor), then **right-click Navigator → Refresh**.
 
@@ -566,7 +577,15 @@ Alerts fire on the **close of the signal bar**, once per bar.
 
 ## 13. Input reference — EA
 
-The EA's group A mirrors indicator inputs 1–27 and forwards them via `iCustom`. Groups B–E are execution only.
+The EA ships as **three thin wrapper files around one shared core** (`QuantRegimeConfluenceEA_Core.mqh`). Every wrapper runs identical logic; only the *defaults* differ. Pick the front door that matches your instrument:
+
+| File | Profile | Min TF | Spread guard | Friday cut | Daily loss | Magic / comment |
+|---|---|---|---|---|---|---|
+| `QuantRegimeConfluenceEA.mq5` | generic | M15 | 25 pts | off | 3% | `20260825` / `QRC` |
+| `QuantRegimeConfluenceEA_Forex.mq5` | forex | M15 | 25 pts | **on, 19:00** | 3% | `20260829` / `QRC-FX` |
+| `QuantRegimeConfluenceEA_Crypto.mq5` | crypto | H1 | 60 pts | off | 4% | `20260830` / `QRC-C` |
+
+Nothing is locked — every value is still an overridable input. Group A (27 inputs) mirrors indicator inputs 1–27 and is forwarded via `iCustom`. Beware the positional trap: `input group` headers consume slots, so the call passes **32 arguments (27 values + 5 group placeholders)** to reach `InpScoreThreshold`. The logistic weights `InpBias`, `InpW1…InpW10` (indicator inputs 28+) are left at the indicator's own defaults. Groups B–E are execution only. A full execution-layer guide, including sizing math and R tracking, is in `QRC_EA_Documentation.md`.
 
 ### B. Risk and sizing
 
@@ -575,11 +594,11 @@ The EA's group A mirrors indicator inputs 1–27 and forwards them via `iCustom`
 | `InpRiskPercent` | `0.50` | % of balance risked per trade |
 | `InpFixedLots` | `0.0` | >0 overrides risk % |
 | `InpMaxLots` | `5.0` | Hard cap |
-| `InpMaxSpreadPts` | `25.0` | Max spread to enter (0 = off) |
+| `InpMaxSpreadPts` | `25.0` (crypto `60.0`) | Max spread to enter (0 = off) |
 | `InpMaxDriftR` | `0.35` | Reject if price drifted past the model entry by more than this × risk |
 | `InpSlippagePts` | `20` | Max deviation |
 
-Sizing uses `SYMBOL_TRADE_TICK_VALUE` / `SYMBOL_TRADE_TICK_SIZE`, so it is correct for FX, metals, indices and crypto alike — it never assumes 1 point equals 1 unit.
+Sizing uses `SYMBOL_TRADE_TICK_VALUE` / `SYMBOL_TRADE_TICK_SIZE`, so it is correct for FX, metals, indices and crypto alike — it never assumes 1 point equals 1 unit. Lots are always sized from the **real fill-to-stop distance**, never the indicator's theoretical one, and the broker's volume step / min / max are respected (a trade below the minimum lot is skipped and logged). The order is also pre-checked against margin (`OrderCalcMargin`, rejected if it would need more than 90% of free margin).
 
 ### C. Trade management
 
@@ -594,6 +613,9 @@ Sizing uses `SYMBOL_TRADE_TICK_VALUE` / `SYMBOL_TRADE_TICK_SIZE`, so it is corre
 | `InpUseTrailing` | `true` | Trail the stop |
 | `InpTrailStartR` | `1.50` | Start trailing, in R |
 | `InpTrailDistR` | `1.00` | Trail distance, in R |
+| `InpTrailStepR` | `0.10` | Min stop advance before modifying (R, 0 = every tick) |
+
+Break-even is a **one-shot** move (triggered once, never throttled). Trailing only advances the stop after the staged move exceeds `InpTrailStepR × risk`, so a trending position does not flood the broker with per-tick `PositionModify` calls. Neither move ever pushes the stop inside the broker's freeze band.
 
 ### D. Guards
 
@@ -601,14 +623,19 @@ Sizing uses `SYMBOL_TRADE_TICK_VALUE` / `SYMBOL_TRADE_TICK_SIZE`, so it is corre
 |---|---|---|
 | `InpUseTimeFilter` | `false` | Restrict hours (server time) |
 | `InpStartHour` / `InpEndHour` | `7` / `20` | Wraps midnight correctly |
-| `InpNoFridayLate` | `false` | Cut off late Friday |
+| `InpNoFridayLate` | `false` (forex `true`) | Cut off late Friday |
 | `InpFridayStopHour` | `19` | Friday cut-off |
-| `InpMaxDailyLossPct` | `3.0` | Halt for the day (0 = off) |
+| `InpMaxDailyLossPct` | `3.0` (crypto `4.0`) | Halt for the day (0 = off) |
 | `InpMaxTradesPerDay` | `0` | 0 = unlimited |
 
 ### E. Bookkeeping
 
-`InpMagic` `20260825` · `InpComment` `"QRC"` · `InpVerboseLog` `true`
+| Input | Default | Notes |
+|---|---|---|
+| `InpMagic` | `20260825` (forex `20260829`, crypto `20260830`) | Magic number |
+| `InpComment` | `"QRC"` (forex `"QRC-FX"`, crypto `"QRC-C"`) | Order comment |
+| `InpVerboseLog` | `true` | Log every decision to the Experts tab |
+| `InpSummaryBars` | `12` | Heartbeat: proof-of-life every N closed bars (0 = off) |
 
 With verbose logging on, **every decision including refusals** goes to the Experts tab:
 
@@ -618,7 +645,7 @@ QRC-EA | signal ignored: price already moved 0.52R past the model entry (limit 0
 QRC-EA | BUY  0.34 lots @ 1.08421  SL 1.08102  TP 1.09059 | score 88.3 regime 2
 ```
 
-That log is the primary debugging tool.
+The heartbeat line (`QRC-EA | watching | bars N  signals N  entries N  open N | last score …`) prints every `InpSummaryBars` closed bars, so a quiet run is provably alive and you can see how close the score got to the threshold. That log is the primary debugging tool.
 
 ---
 
@@ -647,10 +674,10 @@ Run `QRC_SelfTest` (drag onto any chart; it reads no market data). It pushes ran
 Expected output:
 
 ```
-  A random walk (null)     ERn≈1.00  VR≈1.00  z≈ 0.00  |Tn|≈1.00  H≈0.50
-  B drift only             ERn≈2.07  VR≈1.00  z≈ 0.00
-  C AR(1) phi=+0.35        ERn≈1.41  VR≈1.66  z≈ 3.51  H≈0.68
-  D AR(1) phi=-0.35        ERn≈0.74  VR≈0.59  z≈-2.22  H≈0.30
+  A random walk (null)     ERn≈1.00  VR≈1.00  z≈ 0.00  F≈1.00  |Tn|≈1.00  H≈0.50
+  B drift only             ERn≈2.07  VR≈1.00  z≈ 0.00  F≈1.00
+  C AR(1) phi=+0.35        ERn≈1.41  VR≈1.66  z≈ 3.51  F≈1.00  H≈0.68
+  D AR(1) phi=-0.35        ERn≈0.74  VR≈0.59  z≈-2.22  F≈1.00  H≈0.30
 
   VERDICT: PASS - all estimators match their null distributions.
 ```
@@ -688,7 +715,7 @@ The EA enters on bar open, but exits are SL/TP hits **inside** a bar. Open-price
 
 ```powershell
 & "C:\Program Files\Go MetaTrader 5\terminal64.exe" `
-    /config:"c:\myfiles\training_folder\qrc_backtest.ini"
+    /config:"c:\myfiles\training_folder\QuantRegimeConfluence\qrc_backtest.ini"
 ```
 
 The terminal runs the test, writes `QRC_Report.html`, and exits (`ShutdownTerminal=1`). Edit `Symbol`, `Period`, `FromDate`, `ToDate` and `Model` in the file.
@@ -697,7 +724,7 @@ The terminal runs the test, writes `QRC_Report.html`, and exits (`ShutdownTermin
 
 ## 16. Optimisation strategy
 
-There are 83 indicator inputs and 27 EA inputs. **Never optimise them together.** Work in stages, freezing everything else:
+There are 74 indicator inputs and 54 EA inputs (27 forwarded to the indicator + 27 execution-only). **Never optimise them together.** Work in stages, freezing everything else:
 
 1. **Regime layer** — `InpTrendERn`, `InpSlopeT`, `InpVRz`, `InpExpandF`, `InpCompressF`, `InpRegimeSrc`. Hold the score threshold low so you are measuring regime quality, not gating.
 2. **Trigger layer** — `InpEMAPeriod`, `InpPullbackBars`, `InpMinBodyRatio`, `InpMinDisplATR`.
@@ -725,6 +752,8 @@ For serious coefficient fitting, exporting features to CSV and fitting a logisti
 | EA never trades but arrows appear | Check the Experts log — every refusal is logged with its reason. |
 | `risk X% implies N lots, below broker minimum` | Raise `InpRiskPercent`, or the symbol's minimum lot is too large for your balance. |
 | EA trades differ from chart arrows | Indicator/EA input mismatch. The EA forwards its own group-A values, which override chart settings. |
+| EA logs `WARNING: the X profile expects M15/H1 or higher` | Chart timeframe is below the profile's minimum. Signals may still be valid if the spread is small against the indicator's stops, but check it — see §13. |
+| EA logs nothing at all, ever | Check `InpVerboseLog` and `InpSummaryBars`. With the heartbeat on, a live EA prints `watching | …` every N bars; total silence means it is not attached, not that it is idle. |
 | Self-test `VERDICT: FAIL` | An estimator has drifted from its null. Real regression — do not ignore. |
 
 ---
@@ -738,7 +767,7 @@ For serious coefficient fitting, exporting features to CSV and fitting a logisti
 3. **Synthetic calibration.** Random walks lack fat tails, volatility clustering and session structure. Real-market nulls differ.
 4. **The slope statistic is a ranking device, not a hypothesis test.** `Tn` is normalised against the measured spurious-regression null, which makes it comparable and lookback-invariant — but it still is not a p-value.
 5. **R tracking does not survive EA restarts.** Positions open across a restart have their R reconstructed from the current stop; if it had already moved to break-even the reconstruction is wrong, so those positions are only trailed, never re-break-evened.
-6. **`iCustom` parameters are positional.** Reordering, inserting or deleting an indicator input above `InpScoreThreshold` will silently feed the wrong values into the wrong parameters. It still compiles and still runs. No compiler check exists.
+6. **`iCustom` parameters are positional.** The EA forwards 27 values plus 5 `input group` placeholders (32 arguments) to reach `InpScoreThreshold`. Reordering, inserting or deleting an input — or an `input group` header — in the indicator above `InpScoreThreshold` silently feeds the wrong values into the wrong parameters. It still compiles and still runs. No compiler check exists. The indicator prints its resolved config at `OnInit` for exactly this reason.
 7. **Two files must be kept in sync.** The EA mirrors 27 indicator inputs by hand.
 8. **Tick-volume, not real volume.** Feature 9 uses `tick_volume`, a proxy. On FX that is all MT5 provides.
 9. **Single-symbol.** No correlation awareness, no portfolio-level risk.
@@ -757,7 +786,7 @@ If you change **X**, you must also update **Y**:
 | Buffer order | The buffer contract in §11 **and** the EA |
 | A new per-bar side effect | Place it **after** the `g_lastBarTime` guard (Invariant 3) |
 | Feature count in `SignalScore` | `InpBias` — otherwise the score distribution shifts and `InpScoreThreshold` silently changes meaning |
-| Indicator input order (positions 1–27) | The `iCustom` call in the EA's `OnInit` |
+| Indicator input order (positions 1–27, including the 5 `input group` headers inside that range) | The `iCustom` call in `QuantRegimeConfluenceEA_Core.mqh`'s `OnInit` — 32 arguments, group placeholders included |
 | Anything in the math section | Re-run `QRC_SelfTest` |
 
 ---
@@ -779,6 +808,14 @@ If you change **X**, you must also update **Y**:
 ### Indicator 1.00
 - Initial release.
 
+### EA 1.10
+- **Profiles.** One strategy, three front doors around a single shared core (`QuantRegimeConfluenceEA_Core.mqh`): `QuantRegimeConfluenceEA.mq5` (generic, original defaults), `_Forex` (M15+, Friday cut-off at 19:00, magic `20260829`, comment `QRC-FX`), `_Crypto` (H1+, 60-pt spread guard, no Friday cut, 4% daily-loss cap, magic `20260830`, comment `QRC-C`). Fix a bug in the core once and all three builds get it.
+- **New:** heartbeat watchdog (`InpSummaryBars`) — a quiet run now provably logs `watching | …` every N bars instead of being indistinguishable from a dead EA.
+- **New:** trailing throttle (`InpTrailStepR`) — stops advance only after a minimum move, ending the per-tick `PositionModify` flood on trending positions.
+- **New:** margin pre-check (`OrderCalcMargin`, 90% free-margin cap) and broker minimum-stop-distance widening.
+- **New:** netting-account warning and a per-profile minimum-timeframe warning at startup.
+- Positions open across an EA restart are adopted and their R reconstructed (logged); reconstructed positions are trailed but never re-break-even'd.
+
 ### EA 1.00
 - Initial release.
 - **Fixed before shipping:** `ReadSignal` conflated "no signal on this bar" with "indicator not ready", and both consumed the bar — a signal on the first bar after attach was lost permanently. Now tri-state.
@@ -790,9 +827,13 @@ If you change **X**, you must also update **Y**:
 | File | Location | Purpose |
 |---|---|---|
 | `QuantRegimeConfluence.mq5` | `MQL5\Indicators\` | The model |
-| `QuantRegimeConfluenceEA.mq5` | `MQL5\Experts\` | Execution |
+| `QuantRegimeConfluenceEA.mq5` | `MQL5\Experts\` | Execution — generic profile |
+| `QuantRegimeConfluenceEA_Forex.mq5` | `MQL5\Experts\` | Execution — forex profile |
+| `QuantRegimeConfluenceEA_Crypto.mq5` | `MQL5\Experts\` | Execution — crypto profile |
+| `QuantRegimeConfluenceEA_Core.mqh` | `MQL5\Experts\` | Execution — shared logic (included by all three wrappers) |
 | `QRC_SelfTest.mq5` | `MQL5\Scripts\` | Estimator validation |
 | `qrc_backtest.ini` | anywhere | Headless tester config |
 | `QRC_Documentation.md` | anywhere | This document |
+| `QRC_EA_Documentation.md` | anywhere | EA execution-layer guide |
 
 Both source files carry extensive header documentation aimed at future maintainers, including the invariants, the calibration table and the traps. **Read those headers before modifying either file.**

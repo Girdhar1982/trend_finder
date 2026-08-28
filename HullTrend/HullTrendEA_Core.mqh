@@ -162,6 +162,7 @@ input group "======== B. Higher-timeframe filter ========"
 input bool                 InpUseHTF       = true;          // Only trade with the higher TF trend
 input bool                 InpHTFAuto      = true;          // Auto-derive the higher TF from the chart TF
 input ENUM_TIMEFRAMES      InpHTF          = PERIOD_H1;     // Higher TF (when Auto = false)
+input double               InpHTFMult      = 12.0;          // Auto: target HTF as a multiple of the chart TF
 input int                  InpHTFShift     = 1;             // HTF bar to read (1 = closed, 0 = forming/repaints)
 
 input group "======== C. Risk and sizing ========"
@@ -332,33 +333,92 @@ bool UsableValue(const double v)
   }
 
 //+------------------------------------------------------------------+
-//| Higher timeframe ladder. Roughly 10-15x the chart TF: far enough  |
-//| to describe a different regime, close enough to still turn.       |
+//| Candidate higher timeframes.                                     |
+//|                                                                  |
+//| Deliberately a SUBSET of what MT5 offers. M2/M3/M6/M12, H2/H3/H6 |
+//| and friends are perfectly good CHART timeframes but poor regime  |
+//| filters, and excluding them is what lets the formula below       |
+//| reproduce the original hand-written ladder exactly while also    |
+//| covering the timeframes that ladder had no answer for.           |
+//+------------------------------------------------------------------+
+#define HTF_CANDIDATES 8
+
+ENUM_TIMEFRAMES HTFCandidate(const int i)
+  {
+   switch(i)
+     {
+      case 0:
+         return PERIOD_M5;
+      case 1:
+         return PERIOD_M15;
+      case 2:
+         return PERIOD_M30;
+      case 3:
+         return PERIOD_H1;
+      case 4:
+         return PERIOD_H4;
+      case 5:
+         return PERIOD_D1;
+      case 6:
+         return PERIOD_W1;
+      default:
+         return PERIOD_MN1;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Higher timeframe selection.                                      |
+//|                                                                  |
+//| Targets InpHTFMult x the chart timeframe and snaps to the        |
+//| nearest candidate above. The previous version was a lookup table |
+//| covering eight chart timeframes; every other one fell through to |
+//| a default that returned the chart TF itself, which made OnInit   |
+//| disable the filter. H2, H6, H8 and H12 are ordinary choices, so  |
+//| that gap disabled the single most important filter in the system |
+//| on one log line at startup.                                      |
+//|                                                                  |
+//| Resolves identically to the old table on all eight timeframes it |
+//| did handle: M1->M15, M5->H1, M15->H4, M30->H4, H1->D1, H4->D1,   |
+//| D1->W1. Nothing that already worked changes.                     |
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES PickHTF()
   {
    if(!InpHTFAuto)
       return (InpHTF == PERIOD_CURRENT ? (ENUM_TIMEFRAMES)_Period : InpHTF);
 
-   switch((ENUM_TIMEFRAMES)_Period)
+   const double chart = (double)PeriodSeconds((ENUM_TIMEFRAMES)_Period);
+   if(chart <= 0.0)
+      return (ENUM_TIMEFRAMES)_Period;
+
+   const double mult   = (InpHTFMult < 2.0 ? 2.0 : InpHTFMult);
+   const double target = chart * mult;
+
+   ENUM_TIMEFRAMES best = (ENUM_TIMEFRAMES)_Period;
+   double          bestErr = 0.0;
+   bool            found   = false;
+
+   for(int i = 0; i < HTF_CANDIDATES; i++)
      {
-      case PERIOD_M1:
-         return PERIOD_M15;
-      case PERIOD_M5:
-         return PERIOD_H1;
-      case PERIOD_M15:
-         return PERIOD_H4;
-      case PERIOD_M30:
-         return PERIOD_H4;
-      case PERIOD_H1:
-         return PERIOD_D1;
-      case PERIOD_H4:
-         return PERIOD_D1;
-      case PERIOD_D1:
-         return PERIOD_W1;
-      default:
-         return (ENUM_TIMEFRAMES)_Period;
+      const ENUM_TIMEFRAMES tf = HTFCandidate(i);
+      const double secs = (double)PeriodSeconds(tf);
+      if(secs <= chart)
+         continue;                  // a "higher" timeframe has to be higher
+
+      //--- Error measured in LOG space, so being 2x under target and 2x over
+      //--- it count the same. A linear metric would bias every choice upward,
+      //--- because the candidates get further apart as they get larger.
+      const double err = MathAbs(MathLog(secs / target));
+      if(!found || err < bestErr - 1e-9)
+        {
+         found   = true;
+         best    = tf;
+         bestErr = err;
+        }
      }
+
+   //--- Candidates ascend and the comparison above is strict, so an exact tie
+   //--- keeps the SMALLER timeframe - the more responsive of the two.
+   return (found ? best : (ENUM_TIMEFRAMES)_Period);
   }
 
 //+------------------------------------------------------------------+
@@ -1174,10 +1234,31 @@ int OnInit()
    g_trade.SetAsyncMode(false);
    g_trade.LogLevel(LOG_LEVEL_ERRORS);
 
+   //--- Every counter the summary prints is reset TOGETHER. MT5 keeps globals
+   //--- alive across a re-init (changing the chart timeframe, or the inputs,
+   //--- deinits and re-inits the same instance), so clearing only some of them
+   //--- produced a SUM line that contradicted itself: the veto counts were
+   //--- wiped while the flip count survived, and the log read "flips 3
+   //--- entries 0 vetoes: none" - which looks exactly like an EA that sees
+   //--- signals and silently refuses to trade them. It was neither: the vetoes
+   //--- had simply been erased by the next OnInit.
    ArrayInitialize(g_veto, 0);
    g_preflight  = false;
    g_nStopMods  = 0;
    g_nStopFails = 0;
+   g_barsSeen   = 0;
+   g_nFlips     = 0;
+   g_nEntries   = 0;
+   g_nClosed    = 0;
+   g_nWins      = 0;
+   g_sumR       = 0.0;
+   g_closeSL    = 0;
+   g_closeTP    = 0;
+   g_closeFlip  = 0;
+   g_closeOther = 0;
+   g_sprSum     = 0.0;
+   g_sprMax     = 0.0;
+   g_sprN       = 0;
 
    g_hHull = CreateHullHandle((ENUM_TIMEFRAMES)_Period);
    if(g_hHull == INVALID_HANDLE)
@@ -1227,10 +1308,37 @@ int OnInit()
                       (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL),
                       SpreadPts(),
                       (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE)));
+   //--- Netting vs hedging decides whether two EAs can share a symbol at all.
+   //--- On netting there is one position per symbol, so they cannot: each would
+   //--- be trading a position the other also believes it owns.
+   const long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   const bool hedging    = (marginMode == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+   LogAt(LOGL_EVENTS, "ENV",
+         StringFormat("account: %s | currency %s | leverage 1:%d",
+                      (hedging ? "HEDGING"
+                               : (marginMode == ACCOUNT_MARGIN_MODE_EXCHANGE
+                                  ? "EXCHANGE" : "NETTING")),
+                      AccountInfoString(ACCOUNT_CURRENCY),
+                      (int)AccountInfoInteger(ACCOUNT_LEVERAGE)));
+   if(!hedging)
+      LogAt(LOGL_EVENTS, "ENV",
+            "NOTE: netting account - the broker keeps exactly ONE position per "
+            "symbol. A second EA trading this same symbol shares that position: "
+            "its orders can reduce or close what this EA opened, and the magic- "
+            "number filter cannot separate them. Give each EA its own symbol, or "
+            "use a hedging account.");
+
+   //--- Name the resolved HTF together with the multiple it actually works
+   //--- out to, so an unexpected ladder choice is visible rather than inferred.
+   string htfDesc = "off";
+   if(g_hHullHTF != INVALID_HANDLE)
+      htfDesc = StringFormat("%s (%.0fx)", EnumToString(g_htf),
+                             (double)PeriodSeconds(g_htf) /
+                             (double)PeriodSeconds((ENUM_TIMEFRAMES)_Period));
+
    LogAt(LOGL_EVENTS, "ENV",
          StringFormat("profile %s | HTF %s | risk %.2f%% | SL %s | closeOnFlip %s | "
-                      "balance %.2f | magic %I64d", DEF_PROFILE_NAME,
-                      (g_hHullHTF != INVALID_HANDLE ? EnumToString(g_htf) : "off"),
+                      "balance %.2f | magic %I64d", DEF_PROFILE_NAME, htfDesc,
                       InpRiskPercent, EnumToString(InpSLMode),
                       (InpCloseOnFlip ? "yes" : "no"),
                       AccountInfoDouble(ACCOUNT_BALANCE), InpMagic));

@@ -226,6 +226,7 @@ input group "======== E. Bookkeeping ========"
 input long    InpMagic           = DEF_MAGIC;  // Magic number
 input string  InpComment         = DEF_COMMENT;     // Order comment
 input bool    InpVerboseLog      = true;      // Log decisions to the Experts tab
+input int     InpSummaryBars     = 12;        // Heartbeat every N closed bars (0 = off)
 
 //+------------------------------------------------------------------+
 //| Globals                                                          |
@@ -254,12 +255,47 @@ double   g_dayStartEquity = 0.0;
 int      g_tradesToday   = 0;
 bool     g_dayBlocked    = false;
 
+//--- Watchdog counters. This EA logs only when something happens, so a run
+//--- that produces no signal produces no output at all - indistinguishable
+//--- from a broken handle, a stopped terminal or an EA that was never really
+//--- attached. The heartbeat below turns that silence into a number: how many
+//--- bars were examined, and how close the last one came to the threshold.
+int      g_barsSeen     = 0;
+int      g_nSignals     = 0;
+int      g_nEntries     = 0;
+int      g_lastSumBar   = 0;
+double   g_lastScore    = 0.0;
+int      g_lastRegime   = -1;
+
 //+------------------------------------------------------------------+
 //| Small helpers                                                    |
 //+------------------------------------------------------------------+
 void Log(const string msg)
   {
    if(InpVerboseLog) Print("QRC-EA | ", msg);
+  }
+
+//--- Proof of life, every InpSummaryBars closed bars. The score is the single
+//--- number that explains a quiet run: if it never approaches the threshold
+//--- the model is simply not finding this market, which is a very different
+//--- problem from the EA not running.
+void Heartbeat()
+  {
+   if(InpSummaryBars <= 0) return;
+   //--- Always speak on the FIRST closed bar of a run. Waiting a full interval
+   //--- to say anything is the same silence this is meant to cure: on M5 with
+   //--- the default interval that is an hour before the log confirms the EA is
+   //--- alive, which is long enough to conclude it is not.
+   if(g_barsSeen > 1 && g_barsSeen - g_lastSumBar < InpSummaryBars) return;
+   g_lastSumBar = g_barsSeen;
+
+   int nLong = 0, nShort = 0;
+   const int nPos = OwnPositions(nLong, nShort);
+   Log(StringFormat("watching | bars %d  signals %d  entries %d  open %d | "
+                    "last score %.1f (need >= %.1f)  regime %d  spread %.1f pts (max %.1f)",
+                    g_barsSeen, g_nSignals, g_nEntries, nPos,
+                    g_lastScore, InpScoreThreshold, g_lastRegime,
+                    SpreadPts(), InpMaxSpreadPts));
   }
 
 double Pt()       { return SymbolInfoDouble(_Symbol, SYMBOL_POINT); }
@@ -595,6 +631,7 @@ void TryEnter(const QRCSignal &sig)
    const ulong  ticket   = g_trade.ResultOrder();
    const double realFill = (g_trade.ResultPrice() > 0.0 ? g_trade.ResultPrice() : fill);
    g_tradesToday++;
+   g_nEntries++;
 
    Log(StringFormat("%s %.2f lots @ %s  SL %s  TP %s  | score %.1f  regime %d  "
                     "risk %.2f%%  drift %.2fR",
@@ -808,6 +845,35 @@ int OnInit()
    RollDay();
    ArrayFree(g_track);
 
+   //--- Cleared together, so the heartbeat always describes THIS run rather
+   //--- than a mixture of this one and whatever the instance did before the
+   //--- last timeframe or parameter change.
+   g_lastBar    = 0;
+   g_barsSeen   = 0;
+   g_nSignals   = 0;
+   g_nEntries   = 0;
+   g_lastSumBar = 0;
+   g_lastScore  = 0.0;
+   g_lastRegime = -1;
+
+   //--- Netting vs hedging decides whether two EAs can share a symbol at all.
+   //--- On netting there is one position per symbol, so they cannot: each would
+   //--- be trading a position the other also believes it owns.
+   const long marginMode = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   const bool hedging    = (marginMode == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+   Log(StringFormat("account: %s | currency %s | leverage 1:%d",
+                    (hedging ? "HEDGING"
+                             : (marginMode == ACCOUNT_MARGIN_MODE_EXCHANGE
+                                ? "EXCHANGE" : "NETTING")),
+                    AccountInfoString(ACCOUNT_CURRENCY),
+                    (int)AccountInfoInteger(ACCOUNT_LEVERAGE)));
+   if(!hedging)
+      Log("NOTE: netting account - the broker keeps exactly ONE position per "
+          "symbol. A second EA trading this same symbol shares that position: "
+          "its orders can reduce or close what this EA opened, and the magic- "
+          "number filter cannot separate them. Give each EA its own symbol, or "
+          "use a hedging account.");
+
    //--- The timeframe is only a proxy for what actually matters, which is
    //--- spread relative to the range this model trades. It is free, though,
    //--- and it catches the obvious case before any money moves.
@@ -848,7 +914,12 @@ void OnTick()
    const int rc = ReadSignal(sig);
    if(rc < 0) return;              // not ready - retry next tick, bar NOT consumed
    g_lastBar = bt;                 // bar consumed
+   g_barsSeen++;
+   g_lastScore  = sig.score;
+   g_lastRegime = sig.regime;
+   Heartbeat();
    if(rc == 0) return;             // read fine, nothing on this bar
+   g_nSignals++;
 
    if(InpCloseOnOpposite) CloseOpposite(sig.dir);
 
