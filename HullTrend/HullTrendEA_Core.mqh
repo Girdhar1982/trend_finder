@@ -276,7 +276,9 @@ struct TrackRec
    int               dir;
    bool              beDone;
    double            target;      // S/R level ahead at entry, 0 = none
-   bool              partialDone; // the structural partial has been taken
+   bool              targetHit;   // price actually reached that level
+   int               partialTries;// failed partial-close attempts so far
+   bool              partialDone; // ...and the partial has been settled, either way
   };
 TrackRec g_track[];
 
@@ -288,6 +290,7 @@ datetime g_dayStart        = 0;
 double   g_dayStartBalance = 0.0;
 int      g_tradesToday     = 0;
 bool     g_dayBlocked      = false;
+datetime g_lastFlatten     = 0;      // throttles the halt's close attempts
 
 //--- armed flip waiting for its guards (see design note 4)
 struct HullSignal
@@ -582,7 +585,7 @@ ENUM_TIMEFRAMES PickHTF()
 //| call must pass 24 arguments with a placeholder at every group      |
 //| position. Getting it wrong fails SILENTLY: the values shift one    |
 //| slot left and the indicator simply runs with the wrong settings.   |
-//| AssertHullHandle() below turns that into a startup failure.        |
+//| CheckHullHandle() below cross-checks the count at startup.         |
 //+------------------------------------------------------------------+
 int CreateHullHandle(const ENUM_TIMEFRAMES tf)
   {
@@ -620,7 +623,7 @@ int CreateHullHandle(const ENUM_TIMEFRAMES tf)
 //--- input list. IndicatorParameters is only advisory - if the terminal cannot
 //--- answer we warn rather than refuse to start - but a definite mismatch is
 //--- fatal, because every setting past the first wrong slot would be garbage.
-bool AssertHullHandle(const int h, const string what)
+void CheckHullHandle(const int h, const string what)
   {
    ENUM_INDICATOR type;
    MqlParam       p[];
@@ -631,17 +634,31 @@ bool AssertHullHandle(const int h, const string what)
       LogAt(LOGL_EVENTS, "ENV",
             StringFormat("could not read back the %s handle's parameter list - "
                          "check the indicator's own 'Hull Trend config:' line instead", what));
-      return true;
+      return;
      }
-   if(n != HULL_ICUSTOM_ARGS)
+
+   //--- Some builds count the indicator NAME as parameter 0, so n and n-1 are
+   //--- both honest readings of the same correct call.
+   if(n == HULL_ICUSTOM_ARGS || n == HULL_ICUSTOM_ARGS + 1)
      {
-      LogErr(StringFormat("FATAL: the %s handle reports %d parameters, expected %d. "
-                          "HullTrend_MT5's input list and CreateHullHandle() have drifted "
-                          "apart - every setting after the first mismatch would be silently "
-                          "wrong. Re-sync them before trading.", what, n, HULL_ICUSTOM_ARGS));
-      return false;
+      LogAt(LOGL_EVENTS, "ENV",
+            StringFormat("%s handle: %d iCustom parameters, as expected (%d + optional name slot)",
+                         what, n, HULL_ICUSTOM_ARGS));
+      return;
      }
-   return true;
+
+   //--- Deliberately NOT fatal. Exactly what IndicatorParameters() counts for an
+   //--- iCustom handle is not documented tightly enough to bet a refusal-to-start
+   //--- on, and an EA that will not run at all is worse than the bug this guards
+   //--- against. The authoritative check remains the indicator's own
+   //--- "Hull Trend config:" line - compare it against the profile values in the
+   //--- ENV block below. If the two disagree, the arguments are not arriving.
+   LogErr(StringFormat("the %s handle reports %d iCustom parameters, expected %d (or %d). "
+                       "HullTrend_MT5's input list and CreateHullHandle() may have drifted "
+                       "apart - every setting after the first mismatch would be silently wrong. "
+                       "VERIFY the indicator's 'Hull Trend config:' line against the profile "
+                       "values before trusting any result.",
+                       what, n, HULL_ICUSTOM_ARGS, HULL_ICUSTOM_ARGS + 1));
   }
 
 //+------------------------------------------------------------------+
@@ -900,6 +917,8 @@ void TrackAdd(const ulong ticket, const double entry, const double risk,
    g_track[n].dir         = dir;
    g_track[n].beDone      = beAlready;
    g_track[n].target      = target;
+   g_track[n].targetHit   = false;
+   g_track[n].partialTries = 0;
    g_track[n].partialDone = false;
   }
 
@@ -1211,6 +1230,7 @@ void RollDay()
       g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
       g_tradesToday     = 0;
       g_dayBlocked      = false;
+      g_lastFlatten     = 0;
      }
   }
 
@@ -1339,6 +1359,14 @@ void HaltCheck()
       return;
    if(OwnPositionCount() == 0)
       return;
+
+   //--- A close can be refused - a thin Friday-evening book, a requote storm,
+   //--- a session that has already shut. Unthrottled, the retry runs on every
+   //--- tick and writes one ERROR per position per tick, which is how a real
+   //--- problem gets buried under thousands of copies of itself.
+   if(g_lastFlatten > 0 && TimeCurrent() - g_lastFlatten < 10)
+      return;
+   g_lastFlatten = TimeCurrent();
 
    FlattenAll(why);
   }
@@ -1657,6 +1685,8 @@ void ManagePositions()
       if(InpUseSR && InpSRTargetPart > 0.0 && !g_track[idx].partialDone &&
          g_track[idx].target > 0.0 && (price - g_track[idx].target) * dir >= 0.0)
         {
+         g_track[idx].targetHit = true;
+
          const double cut = ClampLots(vol * InpSRTargetPart);
          if(cut >= minLot && (vol - cut) >= minLot)
            {
@@ -1670,8 +1700,23 @@ void ManagePositions()
                                   DoubleToString(g_track[idx].target, _Digits), rNow));
               }
             else
-               LogErr(StringFormat("#%I64u partial close FAILED: %d (%s)", ticket,
-                                   g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription()));
+              {
+               //--- Bounded retry. A requote is worth trying again; a broker that
+               //--- keeps refusing is not, and an unbounded retry writes one ERROR
+               //--- per tick for the life of the position.
+               g_track[idx].partialTries++;
+               LogErr(StringFormat("#%I64u partial close FAILED (attempt %d/5): %d (%s)",
+                                   ticket, g_track[idx].partialTries,
+                                   g_trade.ResultRetcode(),
+                                   g_trade.ResultRetcodeDescription()));
+               if(g_track[idx].partialTries >= 5)
+                 {
+                  g_track[idx].partialDone = true;
+                  LogErr(StringFormat("#%I64u giving up on the structural partial - "
+                                      "the whole position runs on to the flip or the stop",
+                                      ticket));
+                 }
+              }
            }
          else
            {
@@ -1692,9 +1737,10 @@ void ManagePositions()
       //--- the broker's freeze band, and marking it done here would mean
       //--- break-even is never retried.
       //---
-      //--- Taking the structural partial also arms break-even regardless of R:
-      //--- once part of the trade is banked at a level, the rest runs free.
-      const bool beTrigger = (rNow >= InpBEatR) || g_track[idx].partialDone;
+      //--- REACHING the structural level arms break-even regardless of R, whether
+      //--- or not the partial could actually be split off: price has arrived where
+      //--- the trade said it would, so the rest should not be allowed to lose.
+      const bool beTrigger = (rNow >= InpBEatR) || g_track[idx].targetHit;
       if(InpUseBreakEven && !g_track[idx].beDone && beTrigger)
         {
          const double be = open + dir * InpBEoffsetPts * Pt();
@@ -1876,8 +1922,7 @@ int OnInit()
       LogErr("FATAL: cannot create the indicator handle. Is HullTrend_MT5.ex5 in MQL5\\Indicators ?");
       return INIT_FAILED;
      }
-   if(!AssertHullHandle(g_hHull, "trading-TF"))
-      return INIT_FAILED;
+   CheckHullHandle(g_hHull, "trading-TF");
 
    g_htf = PickHTF();
    if(InpUseHTF && g_htf != (ENUM_TIMEFRAMES)_Period)
@@ -1888,8 +1933,7 @@ int OnInit()
          LogErr("FATAL: cannot create the higher-timeframe indicator handle.");
          return INIT_FAILED;
         }
-      if(!AssertHullHandle(g_hHullHTF, "higher-TF"))
-         return INIT_FAILED;
+      CheckHullHandle(g_hHullHTF, "higher-TF");
      }
    else
       if(InpUseHTF)

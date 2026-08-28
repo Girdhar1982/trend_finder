@@ -116,7 +116,9 @@ iCustom(_Symbol, tf, "HullTrend_MT5",
 Getting the placeholder count wrong fails **silently**: every value shifts one slot left and the indicator simply runs with the wrong settings. Three things defend against that now:
 
 1. The indicator prints its resolved configuration at `OnInit` (`Hull Trend config: …`), so a shift is visible in the log.
-2. The EA declares `HULL_ICUSTOM_ARGS` (currently `24`) and checks it against the live handle with `IndicatorParameters()` at `OnInit`. A definite mismatch is **fatal** — the EA refuses to start rather than trade a mis-parameterised signal. If the terminal cannot answer the query the EA warns and continues, pointing you at check 1.
+2. The EA declares `HULL_ICUSTOM_ARGS` (currently `24`) and cross-checks it against the live handle with `IndicatorParameters()` at `OnInit`, logging the observed count in the `ENV` block. `HULL_ICUSTOM_ARGS` and `HULL_ICUSTOM_ARGS + 1` both pass, because some builds count the indicator name as parameter 0.
+
+   A mismatch is a loud `ERROR`, **not** a refusal to start. What `IndicatorParameters()` counts for an `iCustom` handle is not documented tightly enough to bet a refusal-to-start on, and an EA that will not run at all is worse than the bug this guards against. Treat the error as "go and read check 1 before trusting anything".
 3. `HullTrend_MT5.mq5` carries the count in a comment above its input block.
 
 Do not reorder, insert or delete an input or a group header without updating all three.
@@ -485,7 +487,7 @@ See §23 for what these do and how to tune them.
 | `stop modify failed` | Freeze band or broker refusal; logged with the retcode. Counted in `SUM` (`stopMods X (N failed)`). |
 | EA stopped trading after upgrading to 1.40 | Check the `SUM` line for `no-room-to-level`. If it outnumbers entries, `InpSRVetoATR` is above the typical level spacing — the same line prints `avg room ahead`; set the veto below it, or `0` to disable (§23). |
 | Results changed after upgrading to 1.40 | Expected. Halts now flatten open positions by default. Set `InpFlattenOnFriday` and `InpFlattenOnLoss` to `false` to reproduce the old behaviour (§14). |
-| `FATAL: the trading-TF handle reports N parameters` | The indicator's input list and `CreateHullHandle()` have drifted apart. Re-sync both and `HULL_ICUSTOM_ARGS` (§4). |
+| `the trading-TF handle reports N iCustom parameters, expected 24` | The indicator's input list and `CreateHullHandle()` may have drifted apart. Confirm against the indicator's `Hull Trend config:` line, then re-sync both and `HULL_ICUSTOM_ARGS` (§4). The EA still runs — do not trust its results until you have checked. |
 | `no usable data for 100 consecutive ticks` | The indicator is not compiled, or the symbol/timeframe history is not loaded. Nothing trades until it is. |
 | Vetoes total more than flips | Expected since 1.40: guards are re-tested per bar while a signal is armed, so the histogram counts attempts (§7). |
 
@@ -531,7 +533,7 @@ See §23 for what these do and how to tune them.
 - **Support and resistance** (§23): clustered pivot fractals used to veto entries with no room, take a structural partial, and place the swing stop. Never to generate an entry.
 - **Armed signals** (§7), `InpSignalArmBars`.
 - Friday cut-off and daily-loss halt can now **close** open positions (`InpFlattenOnFriday`, `InpFlattenOnLoss`, both default `true`).
-- `HULL_ICUSTOM_ARGS` is asserted against the live handle via `IndicatorParameters()` at `OnInit`; a definite mismatch is fatal (§4).
+- `HULL_ICUSTOM_ARGS` is cross-checked against the live handle via `IndicatorParameters()` at `OnInit`, and the observed count is printed in `ENV`. A mismatch is a loud error, not a refusal to start (§4).
 - `SUM` reports arm statistics, S/R level count, average room ahead, and warns when the S/R veto is rejecting more than it admits.
 
 **Behaviour changes to be aware of**
