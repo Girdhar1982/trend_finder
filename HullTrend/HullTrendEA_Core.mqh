@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                   HullTrendEA.mq5|
+//|                                              HullTrendEA_Core.mqh|
 //|                                  Copyright 2026, Trading Systems |
 //|                                             https://trading.com  |
 //+------------------------------------------------------------------+
@@ -20,7 +20,27 @@
 //| 3. This is a stop-and-reverse trend follower. The natural exit is |
 //|    the opposite flip; the stop is a disaster brake, not a target. |
 //|                                                                   |
-//| 4. COST WARNING. An HMA flip system pays the spread on every      |
+//| 4. A flip ARMS a signal rather than firing a single shot at it.   |
+//|    The guards are then re-tested every tick for InpSignalArmBars  |
+//|    bars. Two problems fall out of this. First, a reversal whose   |
+//|    own close-out had not settled yet used to be vetoed by the     |
+//|    position limit and lost forever - the EA closed the old trade  |
+//|    and never opened the new one, which is the worst possible half |
+//|    of a stop-and-reverse. Second, the HTF filter vetoing the flip |
+//|    bar used to discard the whole move even when the HTF agreed    |
+//|    two bars later. The drift guard is what expires a stale arm:   |
+//|    the signal keeps the ORIGINAL bar close, so as price runs the  |
+//|    measured drift grows until the trade is no longer the one the  |
+//|    model asked for.                                               |
+//|                                                                   |
+//| 5. Support and resistance are used to VETO and to TAKE PROFIT,    |
+//|    never to generate an entry. Bounce trading is a different      |
+//|    strategy with a different edge and a different stop; mixing it |
+//|    in here would make both untestable. Levels are clustered pivot |
+//|    fractals confirmed k bars after the fact, so they never        |
+//|    repaint.                                                       |
+//|                                                                   |
+//| 6. COST WARNING. An HMA flip system pays the spread on every      |
 //|    reversal. Round-trip cost as a fraction of ATR(14) is roughly  |
 //|    0.5-0.9x on M1 FX, 0.25-0.4x on M5 and 0.12-0.2x on M15. M1 on |
 //|    retail FX does not clear its own costs. M5 is the practical    |
@@ -33,6 +53,7 @@
 //|     ENV    once at startup - symbol and broker facts              |
 //|     BAR    one closed bar (level 3 only - noisy on M1)            |
 //|     FLIP   the indicator changed trend                            |
+//|     ARM    a flip is waiting for its guards to clear              |
 //|     ENTRY  an order was placed                                    |
 //|     VETO   a flip was NOT traded, and why                         |
 //|     STOP   a stop was moved (break-even or trailing)              |
@@ -60,6 +81,7 @@
    #define DEF_RISK_PCT        0.50
    #define DEF_NO_FRIDAY_LATE  false        // 24/7 market, no Friday close
    #define DEF_MAX_DAILY_LOSS  4.0
+   #define DEF_SR_VETO_ATR     0.60         // wider ranges - less room ahead is normal
    #define DEF_MAGIC           20260828
    #define DEF_COMMENT         "HullCrypto"
 #endif
@@ -73,6 +95,7 @@
    #define DEF_RISK_PCT        0.50
    #define DEF_NO_FRIDAY_LATE  true         // weekend gap risk is real in FX
    #define DEF_MAX_DAILY_LOSS  3.0
+   #define DEF_SR_VETO_ATR     0.75
    #define DEF_MAGIC           20260827
    #define DEF_COMMENT         "HullFX"
 #endif
@@ -87,12 +110,18 @@
    #define DEF_RISK_PCT        0.50
    #define DEF_NO_FRIDAY_LATE  true
    #define DEF_MAX_DAILY_LOSS  3.0
+   #define DEF_SR_VETO_ATR     0.75
    #define DEF_MAGIC           20260826
    #define DEF_COMMENT         "HullTrend"
 #endif
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
+
+//--- Number of arguments CreateHullHandle() must pass to iCustom: every input
+//--- HullTrend_MT5 declares PLUS one slot per `input group`. Asserted against
+//--- the live handle at OnInit, because getting it wrong is silent.
+#define HULL_ICUSTOM_ARGS 24
 
 //--- must mirror HullTrend_MT5.mq5 (same order, same values)
 enum ENUM_SLOPE_FILTER_EA
@@ -105,7 +134,7 @@ enum ENUM_SLOPE_FILTER_EA
 enum ENUM_SL_MODE
   {
    SL_ATR   = 0, // ATR multiple below/above the fill
-   SL_SWING = 1, // Recent swing low/high, padded by ATR
+   SL_SWING = 1, // Recent swing / S-R level, padded by ATR
    SL_HMA   = 2  // The Hull line itself, padded by ATR
   };
 
@@ -130,6 +159,7 @@ enum ENUM_VETO
    VETO_TRADECAP,
    VETO_BARGAP,
    VETO_SPREAD,
+   VETO_SR,
    VETO_STOPSIDE,
    VETO_DRIFT,
    VETO_LOTS,
@@ -153,10 +183,12 @@ input group "======== A. Signal (forwarded to the indicator) ========"
 input int                  InpHMAPeriod    = 20;            // Hull period
 input ENUM_APPLIED_PRICE   InpHMAPrice     = PRICE_CLOSE;   // Applied price
 input ENUM_SLOPE_FILTER_EA InpSlopeFilter  = EA_SLOPE_ATR;  // Slope threshold mode
-input double               InpSlopeATRMul  = DEF_SLOPE_ATR_MUL;          // ATR mode: slope must exceed ATR x this
+input double               InpSlopeATRMul  = DEF_SLOPE_ATR_MUL;   // ATR mode: slope must exceed ATR x this
 input int                  InpATRPeriod    = 14;            // ATR mode: ATR period
 input double               InpSlopePoints  = 0.0;           // Points mode: minimum slope (points)
 input int                  InpConfirmBars  = 1;             // Counter-trend bars needed to flip
+input int                  InpConfirmWindow = 0;            // Bars a pending flip stays alive (0 = 3x confirm bars)
+input int                  InpSignalArmBars = 3;            // Bars a vetoed flip keeps retrying (0 = flip bar only)
 
 input group "======== B. Higher-timeframe filter ========"
 input bool                 InpUseHTF       = true;          // Only trade with the higher TF trend
@@ -166,11 +198,11 @@ input double               InpHTFMult      = 12.0;          // Auto: target HTF 
 input int                  InpHTFShift     = 1;             // HTF bar to read (1 = closed, 0 = forming/repaints)
 
 input group "======== C. Risk and sizing ========"
-input double               InpRiskPercent  = DEF_RISK_PCT;          // Risk per trade (% of balance)
+input double               InpRiskPercent  = DEF_RISK_PCT;  // Risk per trade (% of balance)
 input double               InpFixedLots    = 0.0;           // Fixed lots (>0 overrides risk %)
 input double               InpMaxLots      = 5.0;           // Hard lot cap
 input ENUM_SL_MODE         InpSLMode       = SL_ATR;        // Stop placement
-input double               InpSLmulATR     = DEF_SL_MUL_ATR;          // SL distance (x ATR) - ATR mode
+input double               InpSLmulATR     = DEF_SL_MUL_ATR;// SL distance (x ATR) - ATR mode
 input int                  InpSwingBars    = 12;            // Swing lookback (bars) - Swing mode
 input double               InpSLpadATR     = 0.30;          // SL padding (x ATR) - Swing / HMA modes
 input double               InpTPmulR       = 0.0;           // Take profit (R). 0 = none, exit on flip
@@ -188,22 +220,37 @@ input double               InpTrailDistR   = 1.00;          // Trail distance (R
 input double               InpTrailStepR   = 0.10;          // Min stop advance before modifying (R, 0 = every tick)
 
 input group "======== E. Guards ========"
-input double               InpMaxSpreadATR = DEF_MAX_SPREAD_ATR;          // Reject if spread > this x ATR (0 = off)
+input double               InpMaxSpreadATR = DEF_MAX_SPREAD_ATR;  // Reject if spread > this x ATR (0 = off)
 input double               InpMaxSpreadPts = 0.0;           // Reject if spread > this many points (0 = off)
 input double               InpMaxDriftR    = 0.35;          // Reject if price drifted > this x risk
 input int                  InpMinBarsGap   = 0;             // Min bars between entries (0 = off)
 input bool                 InpUseTimeFilter = false;        // Restrict trading hours (server time)
 input int                  InpStartHour    = 7;             // Start hour
 input int                  InpEndHour      = 20;            // End hour
-input bool                 InpNoFridayLate = DEF_NO_FRIDAY_LATE;          // No new trades late Friday
+input bool                 InpNoFridayLate = DEF_NO_FRIDAY_LATE;  // No new trades late Friday
 input int                  InpFridayStopHour = 19;          // Friday cut-off hour
-input double               InpMaxDailyLossPct = DEF_MAX_DAILY_LOSS;        // Halt for the day after this % loss (0 = off)
+input bool                 InpFlattenOnFriday = true;       // Also CLOSE open trades at the Friday cut-off
+input double               InpMaxDailyLossPct = DEF_MAX_DAILY_LOSS;  // Halt for the day after this % loss (0 = off)
+input bool                 InpFlattenOnLoss = true;         // Also CLOSE open trades when the daily limit hits
 input int                  InpMaxTradesPerDay = 0;          // Max new trades per day (0 = unlimited)
 
-input group "======== F. Logging ========"
+input group "======== F. Support and resistance ========"
+input bool                 InpUseSR        = true;          // Build S/R levels from pivot fractals
+input int                  InpSRFractal    = 3;             // Bars each side of a pivot (confirmation lag)
+input int                  InpSRLookback   = 400;           // Bars scanned on the trading TF
+input bool                 InpSRUseHTF     = true;          // Also scan the higher timeframe
+input double               InpSRClusterATR = 0.50;          // Merge pivots closer than this x ATR
+input int                  InpSRMinTouches = 2;             // Ignore levels with fewer touches than this
+input int                  InpSRMaxAgeBars = 0;             // Drop levels older than N bars (0 = 20 x Hull period)
+input double               InpSRVetoATR    = DEF_SR_VETO_ATR;  // Veto if the level ahead is nearer than this x ATR (0 = off)
+input double               InpSRTargetPart = 0.50;          // Fraction closed at the level ahead (0 = off)
+input bool                 InpSRStop       = true;          // Swing mode places the stop at an S/R level
+input bool                 InpSRDraw       = false;         // Draw the levels on the chart
+
+input group "======== G. Logging ========"
 input ENUM_LOG_LEVEL       InpLogLevel     = LOGL_DECISIONS; // Log level
 input int                  InpSummaryBars  = 240;           // Print a running summary every N closed bars
-input long                 InpMagic        = DEF_MAGIC;      // Magic number
+input long                 InpMagic        = DEF_MAGIC;     // Magic number
 input string               InpComment      = DEF_COMMENT;   // Order comment
 
 //+------------------------------------------------------------------+
@@ -228,14 +275,48 @@ struct TrackRec
    double            risk;        // original stop distance in price units
    int               dir;
    bool              beDone;
+   double            target;      // S/R level ahead at entry, 0 = none
+   bool              partialDone; // the structural partial has been taken
   };
 TrackRec g_track[];
 
-//--- daily guards
-datetime g_dayStart       = 0;
-double   g_dayStartEquity = 0.0;
-int      g_tradesToday    = 0;
-bool     g_dayBlocked     = false;
+//--- daily guards. The baseline is BALANCE at the roll, not equity: equity at
+//--- midnight carries whatever was floating on an open position, so a day that
+//--- opened inside a drawdown started from an artificially low bar and the halt
+//--- fired late.
+datetime g_dayStart        = 0;
+double   g_dayStartBalance = 0.0;
+int      g_tradesToday     = 0;
+bool     g_dayBlocked      = false;
+
+//--- armed flip waiting for its guards (see design note 4)
+struct HullSignal
+  {
+   bool              flip;    // the trend changed on the signal bar
+   int               dir;     // +1 up, -1 down: the trend AS OF the signal bar
+   double            hma;     // Hull value on the signal bar
+   double            atr;     // ATR on the signal bar
+   double            entry;   // close of the signal bar - what the model assumed
+  };
+HullSignal g_armSig;
+int      g_armDir       = 0;      // 0 = nothing armed
+int      g_armBarsLeft  = 0;
+bool     g_armLogged    = false;  // a veto has been logged for the current bar
+
+//--- support / resistance
+struct SRLevel
+  {
+   double            price;
+   int               touches;
+   datetime          last;
+  };
+SRLevel g_sr[];
+
+//--- data-not-ready watchdogs. A handle that never fills makes the EA look
+//--- like a strategy that simply never signals, with nothing in the log.
+int      g_sigStall = 0;
+int      g_htfStall = 0;
+#define  STALL_ALARM 100
 
 //--- diagnostics. None of this influences trading; it exists so a log can be
 //--- read back and the behaviour reconstructed without the chart.
@@ -255,6 +336,17 @@ double   g_sprMax     = 0.0;
 int      g_sprN       = 0;
 int      g_nStopMods  = 0;
 int      g_nStopFails = 0;
+int      g_nArmed     = 0;
+int      g_nArmLate   = 0;     // entries that needed the arm window
+int      g_nArmExpire = 0;
+int      g_nPartials  = 0;
+
+//--- How much room the nearest level ahead actually leaves, sampled once per
+//--- closed bar. Without this the S/R veto is unfalsifiable: a threshold set
+//--- above the typical spacing between levels rejects everything, and the only
+//--- symptom is an EA that stops trading. Compare it against InpSRVetoATR.
+double   g_srRoomSum  = 0.0;
+int      g_srRoomN    = 0;
 int      g_lastSumBar = 0;
 bool     g_preflight  = false;
 
@@ -287,6 +379,7 @@ string VetoName(const ENUM_VETO v)
       case VETO_TRADECAP:  return "trade-cap";
       case VETO_BARGAP:    return "bar-gap";
       case VETO_SPREAD:    return "spread";
+      case VETO_SR:        return "no-room-to-level";
       case VETO_STOPSIDE:  return "stop-wrong-side";
       case VETO_DRIFT:     return "drift";
       case VETO_LOTS:      return "lots-too-small";
@@ -312,8 +405,18 @@ double Bid()         { return SymbolInfoDouble(_Symbol, SYMBOL_BID);   }
 double SpreadPrice() { return Ask() - Bid(); }
 double SpreadPts()   { const double p = Pt(); return (p > 0.0 ? SpreadPrice() / p : 0.0); }
 
-//--- broker minimum distance for stops, in price units
-double MinStopDist()
+//--- Broker minimum distance for a NEW stop, in price units. The freeze level
+//--- is a different rule - it governs how close to price an EXISTING order may
+//--- be touched - so folding it in here made every initial stop wider than the
+//--- broker actually requires on symbols that publish a large freeze band.
+double StopsDist()
+  {
+   return (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * Pt();
+}
+
+//--- ...and the distance that matters when MODIFYING an existing stop, where
+//--- both rules apply.
+double ModifyDist()
   {
    const long lvl = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    const long frz = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
@@ -323,6 +426,53 @@ double MinStopDist()
 double NormPrice(const double p)
   {
    return NormalizeDouble(p, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+  }
+
+//--- Decimal places implied by the broker's volume step. Hard-coding 2 here
+//--- silently destroyed sizing on any symbol with a finer step: on a 0.001-step
+//--- crypto CFD a correctly computed 0.003 lots was normalised to 0.00 and the
+//--- order was rejected, while 0.005 became 0.01 - double the intended risk.
+int VolDigits()
+  {
+   const double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0)
+      return 2;
+   int    d = 0;
+   double s = step;
+   while(s < 1.0 - 1e-12 && d < 8)
+     {
+      s *= 10.0;
+      d++;
+     }
+   return d;
+  }
+
+//--- One place that turns any desired size into a volume the broker will
+//--- accept. The cap is applied BEFORE the step rounding, because a cap that
+//--- is not itself a multiple of the step would otherwise produce an off-step
+//--- volume and an "invalid volume" rejection.
+double ClampLots(const double raw)
+  {
+   const double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   const double maxL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   double cap = (maxL > 0.0 ? maxL : raw);
+   if(InpMaxLots > 0.0)
+      cap = MathMin(cap, InpMaxLots);
+
+   double lots = MathMin(raw, cap);
+   if(lots <= 0.0)
+      return 0.0;
+
+   if(step > 0.0)
+     {
+      lots = MathFloor(lots / step + 1e-9) * step;
+      while(lots > cap + 1e-9)
+         lots -= step;
+     }
+   if(lots < 0.0)
+      lots = 0.0;
+   return NormalizeDouble(lots, VolDigits());
   }
 
 //--- EMPTY_VALUE is 1.79e308: arithmetic on it produces inf, so every value
@@ -375,7 +525,7 @@ ENUM_TIMEFRAMES HTFCandidate(const int i)
 //| a default that returned the chart TF itself, which made OnInit   |
 //| disable the filter. H2, H6, H8 and H12 are ordinary choices, so  |
 //| that gap disabled the single most important filter in the system |
-//| on one log line at startup.                                      |
+//| on one log line at startup.                                     |
 //|                                                                  |
 //| Resolves identically to the old table on all eight timeframes it |
 //| did handle: M1->M15, M5->H1, M15->H4, M30->H4, H1->D1, H4->D1,   |
@@ -425,12 +575,14 @@ ENUM_TIMEFRAMES PickHTF()
 //| Build an indicator handle.                                       |
 //|                                                                  |
 //| iCustom arguments are POSITIONAL, and `input group` occupies a    |
-//| slot of its own. HullTrend_MT5 declares 17 parameters spread over |
-//| 4 groups, so this call must pass 21 arguments with a placeholder  |
-//| at every group position. Getting this wrong fails SILENTLY: the   |
-//| values shift one slot left and the indicator simply runs with the |
-//| wrong settings. The indicator prints its resolved configuration   |
-//| at OnInit precisely so that a shift is visible in the log.        |
+//| slot of its own - verified against this build's Experts log, where |
+//| an EA-created handle reports the profile's atrMul while a hand-    |
+//| attached copy of the same indicator reports its own default.       |
+//| HullTrend_MT5 declares 20 parameters spread over 4 groups, so this |
+//| call must pass 24 arguments with a placeholder at every group      |
+//| position. Getting it wrong fails SILENTLY: the values shift one    |
+//| slot left and the indicator simply runs with the wrong settings.   |
+//| AssertHullHandle() below turns that into a startup failure.        |
 //+------------------------------------------------------------------+
 int CreateHullHandle(const ENUM_TIMEFRAMES tf)
   {
@@ -444,19 +596,52 @@ int CreateHullHandle(const ENUM_TIMEFRAMES tf)
                   InpATRPeriod,          //  7 ATR period
                   InpSlopePoints,        //  8 fixed slope, points
                   InpConfirmBars,        //  9 confirmation bars
-                  0,                     // 10 group "Reversal arrows"
-                  false,                 // 11 show arrows   - the EA reads buffers
-                  233,                   // 12 up arrow code
-                  234,                   // 13 down arrow code
-                  10,                    // 14 arrow offset
-                  0,                     // 15 group "Alerts"
-                  0,                     // 16 signal bar    - closed bar
-                  false,                 // 17 pop-up alerts - the EA logs instead
-                  false,                 // 18 sound
-                  "",                    // 19 sound file
-                  false,                 // 20 push
-                  false                  // 21 email
+                  InpConfirmWindow,      // 10 confirmation window
+                  0,                     // 11 group "Reversal arrows"
+                  false,                 // 12 show arrows   - the EA reads buffers
+                  233,                   // 13 up arrow code
+                  234,                   // 14 down arrow code
+                  10,                    // 15 arrow offset, points
+                  0.0,                   // 16 arrow offset, ATR - unused, keeps
+                                         //    the indicator from building an ATR
+                                         //    handle it does not need
+                  0,                     // 17 group "Alerts"
+                  0,                     // 18 signal bar    - closed bar
+                  false,                 // 19 pop-up alerts - the EA logs instead
+                  false,                 // 20 sound
+                  "",                    // 21 sound file
+                  false,                 // 22 push
+                  false,                 // 23 email
+                  false                  // 24 alert on attach
                  );
+  }
+
+//--- Hard-fail on an argument list that has drifted away from the indicator's
+//--- input list. IndicatorParameters is only advisory - if the terminal cannot
+//--- answer we warn rather than refuse to start - but a definite mismatch is
+//--- fatal, because every setting past the first wrong slot would be garbage.
+bool AssertHullHandle(const int h, const string what)
+  {
+   ENUM_INDICATOR type;
+   MqlParam       p[];
+   const int n = IndicatorParameters(h, type, p);
+
+   if(n <= 0)
+     {
+      LogAt(LOGL_EVENTS, "ENV",
+            StringFormat("could not read back the %s handle's parameter list - "
+                         "check the indicator's own 'Hull Trend config:' line instead", what));
+      return true;
+     }
+   if(n != HULL_ICUSTOM_ARGS)
+     {
+      LogErr(StringFormat("FATAL: the %s handle reports %d parameters, expected %d. "
+                          "HullTrend_MT5's input list and CreateHullHandle() have drifted "
+                          "apart - every setting after the first mismatch would be silently "
+                          "wrong. Re-sync them before trading.", what, n, HULL_ICUSTOM_ARGS));
+      return false;
+     }
+   return true;
   }
 
 //+------------------------------------------------------------------+
@@ -464,10 +649,27 @@ int CreateHullHandle(const ENUM_TIMEFRAMES tf)
 //| Uses tick value / tick size so it is correct for FX, metals,     |
 //| indices and crypto alike - never assume 1 point = 1 unit.        |
 //+------------------------------------------------------------------+
-double CalcLots(const double stopDistance)
+double CalcLots(const double stopDistance, const bool verbose)
   {
+   const double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   //--- Fixed lots still have to be a legal volume. Returning the raw input
+   //--- produced "invalid volume" rejections that surfaced only as order-failed,
+   //--- with nothing anywhere saying the size was the problem.
    if(InpFixedLots > 0.0)
-      return InpFixedLots;
+     {
+      const double fixed = ClampLots(InpFixedLots);
+      if(fixed < minL)
+        {
+         if(verbose)
+            LogAt(LOGL_DECISIONS, "VETO",
+                  StringFormat("lots-too-small: fixed %.4f lots clamps to %.4f, broker minimum %.4f",
+                               InpFixedLots, fixed, minL));
+         return 0.0;
+        }
+      return fixed;
+     }
+
    if(stopDistance <= 0.0)
       return 0.0;
 
@@ -484,42 +686,189 @@ double CalcLots(const double stopDistance)
    if(lossPerLot <= 0.0)
       return 0.0;
 
-   double lots = riskMoney / lossPerLot;
-
-   const double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   const double minL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   const double maxL = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-
-   if(step > 0.0)
-      lots = MathFloor(lots / step) * step;
-   lots = MathMin(lots, MathMin(maxL, InpMaxLots));
+   const double lots = ClampLots(riskMoney / lossPerLot);
 
    if(lots < minL)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("lots-too-small: risk %.2f%% of %.2f over a %s stop = %.4f lots, "
-                         "broker minimum %.4f", InpRiskPercent,
-                         AccountInfoDouble(ACCOUNT_BALANCE), DoubleToString(stopDistance, _Digits),
-                         lots, minL));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("lots-too-small: risk %.2f%% of %.2f over a %s stop = %.4f lots, "
+                            "broker minimum %.4f", InpRiskPercent,
+                            AccountInfoDouble(ACCOUNT_BALANCE), DoubleToString(stopDistance, _Digits),
+                            lots, minL));
       return 0.0;
      }
-   return NormalizeDouble(lots, 2);
+   return lots;
   }
 
 //--- reject the order if we cannot afford it rather than letting the server do it
-bool MarginOK(const ENUM_ORDER_TYPE type, const double lots, const double price)
+bool MarginOK(const ENUM_ORDER_TYPE type, const double lots, const double price,
+              const bool verbose)
   {
    double need = 0.0;
    if(!OrderCalcMargin(type, _Symbol, lots, price, need))
+     {
+      //--- this used to be the one reject path with no log line at all, so
+      //--- VETO_MARGIN appeared in the summary with nothing explaining it
+      LogErr(StringFormat("OrderCalcMargin failed for %.4f lots at %s: error %d",
+                          lots, DoubleToString(price, _Digits), GetLastError()));
       return false;
+     }
    const double free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
    if(need > free * 0.90)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("margin: need %.2f, free %.2f", need, free));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("margin: need %.2f, free %.2f", need, free));
       return false;
      }
    return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Support and resistance                                           |
+//|                                                                  |
+//| Levels are pivot fractals - a high with k lower highs on each     |
+//| side - clustered by ATR-scaled proximity, with a touch count as   |
+//| their strength. A pivot at shift i is only examined once the k    |
+//| bars to its RIGHT have closed, so a level never appears, moves or |
+//| disappears after the fact. Highs and lows go into ONE list: a     |
+//| broken resistance becomes support, and a price that is both a     |
+//| pivot high and a pivot low is a stronger level, not two weak ones.|
+//+------------------------------------------------------------------+
+void SRAdd(const double price, const datetime when, const double tol)
+  {
+   const int n = ArraySize(g_sr);
+   for(int i = 0; i < n; i++)
+      if(MathAbs(g_sr[i].price - price) <= tol)
+        {
+         //--- touch-weighted running mean, so the level sits where price
+         //--- actually turned rather than on whichever pivot arrived first
+         g_sr[i].price = (g_sr[i].price * g_sr[i].touches + price) / (g_sr[i].touches + 1);
+         g_sr[i].touches++;
+         if(when > g_sr[i].last)
+            g_sr[i].last = when;
+         return;
+        }
+
+   ArrayResize(g_sr, n + 1);
+   g_sr[n].price   = price;
+   g_sr[n].touches = 1;
+   g_sr[n].last    = when;
+  }
+
+void SRCollect(const ENUM_TIMEFRAMES tf, const int lookback, const double tol,
+               const datetime cutoff)
+  {
+   const int k = (InpSRFractal < 1 ? 1 : InpSRFractal);
+
+   MqlRates r[];
+   ArraySetAsSeries(r, true);
+   const int n = CopyRates(_Symbol, tf, 0, lookback, r);
+   if(n < 2 * k + 2)
+      return;
+
+   //--- shift 0 is still forming, and a pivot needs k CLOSED bars on its right,
+   //--- so the newest bar that can carry one is at shift k + 1
+   for(int i = k + 1; i < n - k; i++)
+     {
+      if(r[i].time < cutoff)
+         break;                       // series is newest-first: everything older follows
+
+      bool hi = true, lo = true;
+      for(int j = 1; j <= k; j++)
+        {
+         if(r[i].high <= r[i - j].high || r[i].high <= r[i + j].high)
+            hi = false;
+         if(r[i].low  >= r[i - j].low  || r[i].low  >= r[i + j].low)
+            lo = false;
+        }
+
+      if(hi)
+         SRAdd(r[i].high, r[i].time, tol);
+      if(lo)
+         SRAdd(r[i].low,  r[i].time, tol);
+     }
+  }
+
+void SRDraw()
+  {
+   ObjectsDeleteAll(0, "HullSR_");
+   if(!InpSRDraw)
+      return;
+
+   const int minT = (InpSRMinTouches < 1 ? 1 : InpSRMinTouches);
+   for(int i = 0; i < ArraySize(g_sr); i++)
+     {
+      if(g_sr[i].touches < minT)
+         continue;
+      const string nm = StringFormat("HullSR_%d", i);
+      if(!ObjectCreate(0, nm, OBJ_HLINE, 0, 0, g_sr[i].price))
+         continue;
+      ObjectSetInteger(0, nm, OBJPROP_COLOR, (g_sr[i].touches >= 3 ? clrOrange : clrDimGray));
+      ObjectSetInteger(0, nm, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, nm, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, nm, OBJPROP_BACK, true);
+      ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+      ObjectSetString(0, nm, OBJPROP_TOOLTIP,
+                      StringFormat("S/R %s  touches %d", DoubleToString(g_sr[i].price, _Digits),
+                                   g_sr[i].touches));
+     }
+  }
+
+//--- Rebuilt once per closed bar. O(lookback) with a tiny constant, which is
+//--- nothing next to the CopyBuffer calls already happening on the same bar.
+void BuildSR(const double atr)
+  {
+   ArrayResize(g_sr, 0);
+   if(!InpUseSR || atr <= 0.0)
+      return;
+
+   const double tol = MathMax(InpSRClusterATR * atr, Pt());
+
+   int maxAge = InpSRMaxAgeBars;
+   if(maxAge <= 0)
+      maxAge = 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20);
+
+   //--- one wall-clock horizon for both timeframes, expressed in chart bars
+   const long    span   = (long)maxAge * PeriodSeconds((ENUM_TIMEFRAMES)_Period);
+   const datetime cutoff = (datetime)MathMax(0.0, (double)TimeCurrent() - (double)span);
+
+   SRCollect((ENUM_TIMEFRAMES)_Period, (InpSRLookback < 50 ? 50 : InpSRLookback), tol, cutoff);
+
+   if(InpSRUseHTF && g_htf != (ENUM_TIMEFRAMES)_Period)
+      SRCollect(g_htf, MathMax(60, InpSRLookback / 4), tol, cutoff);
+
+   if(InpSRDraw)
+      SRDraw();
+  }
+
+//--- Nearest level strictly on the `dir` side of `from` (+1 above, -1 below).
+bool SRNearest(const double from, const int dir, double &lvl, int &touches)
+  {
+   bool   found = false;
+   double bestD = 0.0;
+   const int minT = (InpSRMinTouches < 1 ? 1 : InpSRMinTouches);
+
+   lvl      = 0.0;
+   touches  = 0;
+
+   for(int i = 0; i < ArraySize(g_sr); i++)
+     {
+      if(g_sr[i].touches < minT)
+         continue;
+      const double d = (g_sr[i].price - from) * dir;
+      if(d <= 0.0)
+         continue;                    // wrong side, or exactly on it
+      if(!found || d < bestD)
+        {
+         found   = true;
+         bestD   = d;
+         lvl     = g_sr[i].price;
+         touches = g_sr[i].touches;
+        }
+     }
+   return found;
   }
 
 //+------------------------------------------------------------------+
@@ -537,7 +886,7 @@ int TrackFind(const ulong ticket)
 //--- second one. TrackFind returns the FIRST match, so a duplicate would let a
 //--- stale entry/risk silently win every R calculation for that position.
 void TrackAdd(const ulong ticket, const double entry, const double risk,
-              const int dir, const bool adopted)
+              const int dir, const bool beAlready, const double target)
   {
    int n = TrackFind(ticket);
    if(n < 0)
@@ -545,11 +894,13 @@ void TrackAdd(const ulong ticket, const double entry, const double risk,
       n = ArraySize(g_track);
       ArrayResize(g_track, n + 1);
      }
-   g_track[n].ticket = ticket;
-   g_track[n].entry  = entry;
-   g_track[n].risk   = risk;
-   g_track[n].dir    = dir;
-   g_track[n].beDone = adopted;   // never re-break-even an adopted position
+   g_track[n].ticket      = ticket;
+   g_track[n].entry       = entry;
+   g_track[n].risk        = risk;
+   g_track[n].dir         = dir;
+   g_track[n].beDone      = beAlready;
+   g_track[n].target      = target;
+   g_track[n].partialDone = false;
   }
 
 //+------------------------------------------------------------------+
@@ -557,6 +908,10 @@ void TrackAdd(const ulong ticket, const double entry, const double risk,
 //| it ended. `risk` is the ORIGINAL stop distance, captured while    |
 //| the position was still tracked - the broker no longer knows it    |
 //| once break-even and trailing have moved the stop.                 |
+//|                                                                   |
+//| With a structural partial the position has two OUT deals; the R    |
+//| below is measured against the LAST exit, so treat it as the        |
+//| runner's result rather than the blended one.                       |
 //+------------------------------------------------------------------+
 void LogClosedPosition(const ulong ticket, const double risk)
   {
@@ -567,7 +922,7 @@ void LogClosedPosition(const ulong ticket, const double risk)
      }
 
    double   pnl = 0.0, entryPrice = 0.0, exitPrice = 0.0, lots = 0.0;
-   int      dir = 0;
+   int      dir = 0, nOut = 0;
    datetime exitTime = 0;
    ENUM_DEAL_REASON reason = DEAL_REASON_CLIENT;
 
@@ -595,6 +950,7 @@ void LogClosedPosition(const ulong ticket, const double risk)
             exitPrice = HistoryDealGetDouble(d, DEAL_PRICE);
             exitTime  = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
             reason    = (ENUM_DEAL_REASON)HistoryDealGetInteger(d, DEAL_REASON);
+            nOut++;
            }
      }
 
@@ -604,7 +960,7 @@ void LogClosedPosition(const ulong ticket, const double risk)
    string why = "other";
    if(reason == DEAL_REASON_SL)          { why = "stop-loss";   g_closeSL++;   }
    else if(reason == DEAL_REASON_TP)     { why = "take-profit"; g_closeTP++;   }
-   else if(reason == DEAL_REASON_EXPERT) { why = "flip";        g_closeFlip++; }
+   else if(reason == DEAL_REASON_EXPERT) { why = "ea-exit";     g_closeFlip++; }
    else                                  { g_closeOther++; }
 
    const double r = (risk > 0.0 ? ((exitPrice - entryPrice) * dir) / risk : 0.0);
@@ -615,10 +971,11 @@ void LogClosedPosition(const ulong ticket, const double risk)
       g_nWins++;
 
    LogAt(LOGL_EVENTS, "CLOSE",
-         StringFormat("#%I64u %s %.2f lots  %s -> %s  %+.2fR  pnl %+.2f  reason %s  (%s)",
+         StringFormat("#%I64u %s %.2f lots  %s -> %s  %+.2fR  pnl %+.2f  reason %s%s  (%s)",
                       ticket, DirName(dir), lots,
                       DoubleToString(entryPrice, _Digits), DoubleToString(exitPrice, _Digits),
-                      r, pnl, why, TimeToString(exitTime, TIME_DATE | TIME_MINUTES)));
+                      r, pnl, why, (nOut > 1 ? " [scaled out]" : ""),
+                      TimeToString(exitTime, TIME_DATE | TIME_MINUTES)));
   }
 
 //--- drops records whose position no longer exists, reporting each one on the
@@ -663,17 +1020,15 @@ int OwnPositions(int &nLong, int &nShort)
    return nLong + nShort;
   }
 
+int OwnPositionCount()
+  {
+   int a = 0, b = 0;
+   return OwnPositions(a, b);
+  }
+
 //+------------------------------------------------------------------+
 //| Reading the indicator                                            |
 //+------------------------------------------------------------------+
-struct HullSignal
-  {
-   bool              flip;    // the trend changed on the signal bar
-   int               dir;     // +1 up, -1 down: the trend AS OF the signal bar
-   double            hma;     // Hull value on the signal bar
-   double            atr;     // ATR on the signal bar
-   double            entry;   // close of the signal bar - what the model assumed
-  };
 
 //--- Returns -1 when the data is not available yet. That is NOT "no signal":
 //--- the caller must retry on the next tick instead of consuming the bar.
@@ -745,6 +1100,20 @@ double StopLevel(const HullSignal &sig, const double fill)
   {
    if(InpSLMode == SL_SWING)
      {
+      //--- A clustered level that price has turned at repeatedly is a better
+      //--- stop than the lowest low of the last N bars, which may have been
+      //--- touched exactly once. Fall back to the raw extreme when there is no
+      //--- level, or when the nearest one is so far away it would size the
+      //--- trade down to nothing.
+      if(InpUseSR && InpSRStop)
+        {
+         double lvl = 0.0;
+         int    t   = 0;
+         if(SRNearest(fill, -sig.dir, lvl, t) &&
+            MathAbs(fill - lvl) <= 3.0 * sig.atr)
+            return lvl - sig.dir * InpSLpadATR * sig.atr;
+        }
+
       const int n = (InpSwingBars < 2 ? 2 : InpSwingBars);
       if(sig.dir > 0)
         {
@@ -800,20 +1169,29 @@ void SizingPreflight(const double atr)
 
    LogAt(LOGL_EVENTS, "ENV",
          StringFormat("sizing preflight: ATR %s  SL %.2fxATR = %s  -> %.4f lots wanted "
-                      "(broker min %.4f step %.4f)",
+                      "(broker min %.4f step %.4f, %d volume digits)",
                       DoubleToString(atr, _Digits), InpSLmulATR,
                       DoubleToString(slDist, _Digits), rawLots, minLot,
-                      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP)));
+                      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), VolDigits()));
    LogAt(LOGL_EVENTS, "ENV",
          StringFormat("sizing preflight: one minimum lot risks %.2f = %.2f%% of balance, "
                       "your setting is %.2f%%",
                       minLot * lossPerLot, floorPct, InpRiskPercent));
 
-   if(rawLots < minLot)
-      LogErr(StringFormat("sizing preflight: %.2f%% risk rounds to ZERO lots on this symbol - "
-                          "every signal will be vetoed as lots-too-small. Raise risk above "
-                          "%.2f%%, drop to a lower timeframe, or fund the account further.",
-                          InpRiskPercent, floorPct));
+   if(InpFixedLots > 0.0)
+     {
+      const double fixed = ClampLots(InpFixedLots);
+      if(MathAbs(fixed - InpFixedLots) > 1e-8)
+         LogAt(LOGL_EVENTS, "ENV",
+               StringFormat("sizing preflight: fixed lots %.4f is not a legal volume here - "
+                            "every order will use %.4f", InpFixedLots, fixed));
+     }
+   else
+      if(rawLots < minLot)
+         LogErr(StringFormat("sizing preflight: %.2f%% risk rounds to ZERO lots on this symbol - "
+                             "every signal will be vetoed as lots-too-small. Raise risk above "
+                             "%.2f%%, drop to a lower timeframe, or fund the account further.",
+                             InpRiskPercent, floorPct));
   }
 
 //+------------------------------------------------------------------+
@@ -829,10 +1207,10 @@ void RollDay()
    const datetime today = StructToTime(t);
    if(today != g_dayStart)
      {
-      g_dayStart       = today;
-      g_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-      g_tradesToday    = 0;
-      g_dayBlocked     = false;
+      g_dayStart        = today;
+      g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      g_tradesToday     = 0;
+      g_dayBlocked      = false;
      }
   }
 
@@ -840,29 +1218,42 @@ bool DailyLossHit()
   {
    if(InpMaxDailyLossPct <= 0.0)
       return false;
-   if(g_dayStartEquity <= 0.0)
+   if(g_dayStartBalance <= 0.0)
       return false;
+
+   //--- equity against the day's OPENING BALANCE, so floating P&L on a position
+   //--- that was already open at midnight cannot move the baseline
    const double eq   = AccountInfoDouble(ACCOUNT_EQUITY);
-   const double lost = (g_dayStartEquity - eq) / g_dayStartEquity * 100.0;
+   const double lost = (g_dayStartBalance - eq) / g_dayStartBalance * 100.0;
    if(lost >= InpMaxDailyLossPct)
      {
       if(!g_dayBlocked)
          LogAt(LOGL_EVENTS, "VETO",
-               StringFormat("daily loss limit hit (-%.2f%%) - no new trades today", lost));
+               StringFormat("daily loss limit hit (-%.2f%% against the day's opening balance "
+                            "%.2f) - no new trades today", lost, g_dayStartBalance));
       g_dayBlocked = true;
       return true;
      }
    return false;
   }
 
-bool TimeAllowed()
+bool FridayCutoffNow()
   {
+   if(!InpNoFridayLate)
+      return false;
    MqlDateTime t;
    TimeToStruct(TimeCurrent(), t);
-   if(InpNoFridayLate && t.day_of_week == 5 && t.hour >= InpFridayStopHour)
+   return (t.day_of_week == 5 && t.hour >= InpFridayStopHour);
+  }
+
+bool TimeAllowed()
+  {
+   if(FridayCutoffNow())
       return false;
    if(!InpUseTimeFilter)
       return true;
+   MqlDateTime t;
+   TimeToStruct(TimeCurrent(), t);
    if(InpStartHour <= InpEndHour)
       return (t.hour >= InpStartHour && t.hour < InpEndHour);
    return (t.hour >= InpStartHour || t.hour < InpEndHour);   // wraps midnight
@@ -870,9 +1261,17 @@ bool TimeAllowed()
 
 //+------------------------------------------------------------------+
 //| Exits                                                            |
+//|                                                                  |
+//| Returns TRUE only when nothing on the wrong side is left open.    |
+//| The caller needs to know: a stop-and-reverse that closes the old  |
+//| trade and then silently fails to open the new one is the worst    |
+//| outcome available, and the position-limit veto used to make that  |
+//| the DEFAULT behaviour whenever the close had not settled yet.     |
 //+------------------------------------------------------------------+
-void CloseAgainst(const int newDir)
+bool CloseAgainst(const int newDir)
   {
+   bool allGone = true;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       if(!g_pos.SelectByIndex(i))
@@ -882,31 +1281,91 @@ void CloseAgainst(const int newDir)
       const int dir = (g_pos.PositionType() == POSITION_TYPE_BUY ? 1 : -1);
       if(dir == newDir)
          continue;
-      if(!g_trade.PositionClose(g_pos.Ticket()))
-         LogErr(StringFormat("#%I64u close FAILED: %d (%s)", g_pos.Ticket(),
+
+      const ulong ticket = g_pos.Ticket();
+      if(!g_trade.PositionClose(ticket))
+        {
+         allGone = false;
+         LogErr(StringFormat("#%I64u close FAILED: %d (%s) - the reversal will keep retrying "
+                             "while the signal stays armed", ticket,
                              g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription()));
+        }
+      else
+         if(PositionSelectByTicket(ticket))
+            allGone = false;          // accepted but not booked yet: retry next tick
       //--- the CLOSE line itself is emitted by TrackPrune on the next tick,
       //--- once the broker has actually booked the deal
      }
+   return allGone;
+  }
+
+//--- Close everything we own, used by the Friday cut-off and the daily-loss
+//--- halt. Blocking new entries while leaving the open trade to ride the very
+//--- gap the cut-off exists to avoid was never the intent of those inputs.
+void FlattenAll(const string why)
+  {
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(!g_pos.SelectByIndex(i))
+         continue;
+      if(g_pos.Symbol() != _Symbol || g_pos.Magic() != InpMagic)
+         continue;
+      if(g_trade.PositionClose(g_pos.Ticket()))
+         closed++;
+      else
+         LogErr(StringFormat("#%I64u flatten FAILED: %d (%s)", g_pos.Ticket(),
+                             g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription()));
+     }
+
+   if(closed > 0)
+      LogAt(LOGL_EVENTS, "CLOSE", StringFormat("flattened %d position(s): %s", closed, why));
+
+   g_armDir = 0;   // nothing armed survives a halt
+  }
+
+//--- Run every tick. Cheap, and the cut-off has to bite the moment it arrives
+//--- rather than on the next closed bar.
+void HaltCheck()
+  {
+   string why = "";
+   if(InpFlattenOnFriday && FridayCutoffNow())
+      why = StringFormat("Friday cut-off (%02d:00 server)", InpFridayStopHour);
+   else
+      if(InpFlattenOnLoss && DailyLossHit())
+         why = StringFormat("daily loss limit %.2f%%", InpMaxDailyLossPct);
+
+   if(why == "")
+      return;
+   if(OwnPositionCount() == 0)
+      return;
+
+   FlattenAll(why);
   }
 
 //+------------------------------------------------------------------+
 //| Entry. Returns VETO_NONE if an order went in, otherwise the      |
 //| reason it did not - so the caller can both log and count it.     |
+//|                                                                  |
+//| `verbose` is false on the intrabar retries of an armed signal:   |
+//| the guards are re-tested every tick and logging each rejection   |
+//| would bury the log under thousands of identical lines.           |
 //+------------------------------------------------------------------+
-ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
+ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir, const bool verbose)
   {
    int nLong = 0, nShort = 0;
    const int nPos = OwnPositions(nLong, nShort);
 
    if(nPos >= InpMaxPositions)
      {
-      LogAt(LOGL_DECISIONS, "VETO", StringFormat("pos-limit: %d open, max %d", nPos, InpMaxPositions));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO", StringFormat("pos-limit: %d open, max %d", nPos, InpMaxPositions));
       return VETO_POSLIMIT;
      }
    if((sig.dir > 0 && nLong > 0) || (sig.dir < 0 && nShort > 0))
      {
-      LogAt(LOGL_DECISIONS, "VETO", "same-dir: already in this direction");
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO", "same-dir: already in this direction");
       return VETO_SAMEDIR;
      }
 
@@ -914,23 +1373,26 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
    //--- on low timeframes: a per-bar slope threshold cannot see regime.
    if(InpUseHTF && g_hHullHTF != INVALID_HANDLE && htfDir != 0 && htfDir != sig.dir)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("htf-disagrees: signal %s, %s is %s",
-                         DirName(sig.dir), EnumToString(g_htf), DirName(htfDir)));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("htf-disagrees: signal %s, %s is %s",
+                            DirName(sig.dir), EnumToString(g_htf), DirName(htfDir)));
       return VETO_HTF;
      }
 
    if(!TimeAllowed())
      {
-      LogAt(LOGL_DECISIONS, "VETO", "out-of-hours");
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO", "out-of-hours");
       return VETO_TIME;
      }
    if(DailyLossHit())
       return VETO_DAILYLOSS;
    if(InpMaxTradesPerDay > 0 && g_tradesToday >= InpMaxTradesPerDay)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("trade-cap: %d taken today, max %d", g_tradesToday, InpMaxTradesPerDay));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("trade-cap: %d taken today, max %d", g_tradesToday, InpMaxTradesPerDay));
       return VETO_TRADECAP;
      }
 
@@ -939,8 +1401,9 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
       const int since = iBarShift(_Symbol, _Period, g_lastEntryBar, false);
       if(since >= 0 && since < InpMinBarsGap)
         {
-         LogAt(LOGL_DECISIONS, "VETO",
-               StringFormat("bar-gap: %d bars since the last entry, need %d", since, InpMinBarsGap));
+         if(verbose)
+            LogAt(LOGL_DECISIONS, "VETO",
+                  StringFormat("bar-gap: %d bars since the last entry, need %d", since, InpMinBarsGap));
          return VETO_BARGAP;
         }
      }
@@ -950,18 +1413,38 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
    const double sprATR = (sig.atr > 0.0 ? SpreadPrice() / sig.atr : 0.0);
    if(InpMaxSpreadATR > 0.0 && SpreadPrice() > InpMaxSpreadATR * sig.atr)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("spread: %.1f pts = %.2f x ATR, limit %.2f", SpreadPts(), sprATR, InpMaxSpreadATR));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("spread: %.1f pts = %.2f x ATR, limit %.2f", SpreadPts(), sprATR, InpMaxSpreadATR));
       return VETO_SPREAD;
      }
    if(InpMaxSpreadPts > 0.0 && SpreadPts() > InpMaxSpreadPts)
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("spread: %.1f pts > %.1f", SpreadPts(), InpMaxSpreadPts));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("spread: %.1f pts > %.1f", SpreadPts(), InpMaxSpreadPts));
       return VETO_SPREAD;
      }
 
    const double fill = (sig.dir > 0 ? Ask() : Bid());
+
+   //--- Structural room. A long entered a fraction of an ATR under a level that
+   //--- has already turned price away several times is taking a full-size stop
+   //--- for a truncated move; that is a losing bet whatever the trend says.
+   double srLevel = 0.0;
+   int    srTouch = 0;
+   const bool srAhead = (InpUseSR && SRNearest(fill, sig.dir, srLevel, srTouch));
+   const double srRoom = (srAhead ? MathAbs(srLevel - fill) : 0.0);
+
+   if(srAhead && InpSRVetoATR > 0.0 && sig.atr > 0.0 && srRoom < InpSRVetoATR * sig.atr)
+     {
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("no-room-to-level: %s ahead at %s is %.2fxATR away (%d touches), "
+                            "need %.2f", DirName(sig.dir), DoubleToString(srLevel, _Digits),
+                            srRoom / sig.atr, srTouch, InpSRVetoATR));
+      return VETO_SR;
+     }
 
    double sl = StopLevel(sig, fill);
 
@@ -969,14 +1452,16 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
    //--- through the level this trade was supposed to be protected by
    if((sig.dir > 0 && sl >= fill) || (sig.dir < 0 && sl <= fill))
      {
-      LogAt(LOGL_DECISIONS, "VETO",
-            StringFormat("stop-wrong-side: fill %s, stop %s",
-                         DoubleToString(fill, _Digits), DoubleToString(sl, _Digits)));
+      if(verbose)
+         LogAt(LOGL_DECISIONS, "VETO",
+               StringFormat("stop-wrong-side: fill %s, stop %s",
+                            DoubleToString(fill, _Digits), DoubleToString(sl, _Digits)));
       return VETO_STOPSIDE;
      }
 
-   //--- reject a signal price has already run away from: taking it here ruins
-   //--- the risk:reward the model assumed
+   //--- Reject a signal price has already run away from: taking it here ruins
+   //--- the risk:reward the model assumed. This is also what expires an armed
+   //--- signal, because sig.entry stays pinned to the flip bar's close.
    const double modelRisk = MathAbs(sig.entry - sl);
    double drift = 0.0;
    if(modelRisk > 0.0)
@@ -984,39 +1469,41 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
       drift = ((fill - sig.entry) * sig.dir) / modelRisk;
       if(drift > InpMaxDriftR)
         {
-         LogAt(LOGL_DECISIONS, "VETO",
-               StringFormat("drift: price moved %.2fR past the signal close %s, limit %.2fR",
-                            drift, DoubleToString(sig.entry, _Digits), InpMaxDriftR));
+         if(verbose)
+            LogAt(LOGL_DECISIONS, "VETO",
+                  StringFormat("drift: price moved %.2fR past the signal close %s, limit %.2fR",
+                               drift, DoubleToString(sig.entry, _Digits), InpMaxDriftR));
          return VETO_DRIFT;
         }
      }
 
-   double tp = 0.0;
-   if(InpTPmulR > 0.0)
-      tp = fill + sig.dir * InpTPmulR * MathAbs(fill - sl);
-
-   //--- respect the broker's minimum stop distance, widening if needed
-   const double minD = MinStopDist();
-   if(minD > 0.0)
-     {
-      if(MathAbs(fill - sl) < minD)
-         sl = (sig.dir > 0 ? fill - minD : fill + minD);
-      if(tp > 0.0 && MathAbs(tp - fill) < minD)
-         tp = (sig.dir > 0 ? fill + minD : fill - minD);
-     }
+   //--- respect the broker's minimum stop distance, widening if needed. This
+   //--- has to happen BEFORE the take profit is derived: computing TP from the
+   //--- pre-widened distance left it claiming an R multiple the trade no longer
+   //--- had.
+   const double minD = StopsDist();
+   if(minD > 0.0 && MathAbs(fill - sl) < minD)
+      sl = (sig.dir > 0 ? fill - minD : fill + minD);
 
    sl = NormPrice(sl);
-   if(tp > 0.0)
+
+   double tp = 0.0;
+   if(InpTPmulR > 0.0)
+     {
+      tp = fill + sig.dir * InpTPmulR * MathAbs(fill - sl);
+      if(minD > 0.0 && MathAbs(tp - fill) < minD)
+         tp = (sig.dir > 0 ? fill + minD : fill - minD);
       tp = NormPrice(tp);
+     }
 
    //--- size from the REAL distance, not the theoretical one
    const double realRisk = MathAbs(fill - sl);
-   const double lots     = CalcLots(realRisk);
+   const double lots     = CalcLots(realRisk, verbose);
    if(lots <= 0.0)
       return VETO_LOTS;
 
    const ENUM_ORDER_TYPE type = (sig.dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
-   if(!MarginOK(type, lots, fill))
+   if(!MarginOK(type, lots, fill, verbose))
       return VETO_MARGIN;
 
    g_trade.SetDeviationInPoints(InpSlippagePts);
@@ -1041,11 +1528,16 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
    //--- levels, the volatility it was scaled to, and the cost it paid to get in.
    LogAt(LOGL_EVENTS, "ENTRY",
          StringFormat("%s %.2f lots @ %s  SL %s (%s = %.2fxATR)  TP %s | "
-                      "ATR %s  spread %.1f pts = %.2fxATR  drift %.2fR  risk %.2f%%  bal %.2f",
+                      "level ahead %s  ATR %s  spread %.1f pts = %.2fxATR  drift %.2fR  "
+                      "risk %.2f%%  bal %.2f",
                       DirName(sig.dir), lots, DoubleToString(realFill, _Digits),
                       DoubleToString(sl, _Digits), DoubleToString(realRisk, _Digits),
                       (sig.atr > 0.0 ? realRisk / sig.atr : 0.0),
                       (tp > 0.0 ? DoubleToString(tp, _Digits) : "none"),
+                      (srAhead ? StringFormat("%s (%.2fxATR, %d touches)",
+                                              DoubleToString(srLevel, _Digits),
+                                              (sig.atr > 0.0 ? srRoom / sig.atr : 0.0), srTouch)
+                               : "none"),
                       DoubleToString(sig.atr, _Digits), SpreadPts(), sprATR,
                       drift, InpRiskPercent, AccountInfoDouble(ACCOUNT_BALANCE)));
 
@@ -1059,11 +1551,54 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
       posTicket = (ulong)PositionGetInteger(POSITION_TICKET);
 
    if(posTicket > 0)
-      TrackAdd(posTicket, realFill, realRisk, sig.dir, false);
+      TrackAdd(posTicket, realFill, realRisk, sig.dir, false,
+               (InpSRTargetPart > 0.0 && srAhead ? srLevel : 0.0));
    else
       LogErr("order placed but the position could not be found for R tracking");
 
    return VETO_NONE;
+  }
+
+//+------------------------------------------------------------------+
+//| Service an armed flip. Called once per closed bar (loudly) and    |
+//| on every tick in between (quietly), so a reversal blocked by its  |
+//| own unsettled close-out gets in as soon as the slot frees up      |
+//| instead of being discarded with the bar.                          |
+//+------------------------------------------------------------------+
+void ServiceArm()
+  {
+   if(g_armDir == 0)
+      return;
+
+   int htfDir = 0;
+   if(ReadHTF(htfDir) < 0)
+      return;                       // HTF not ready: try again, keep the arm
+
+   const bool loud = !g_armLogged;
+   const ENUM_VETO v = TryEnter(g_armSig, htfDir, loud);
+
+   if(loud)
+     {
+      g_veto[v]++;
+      g_armLogged = true;
+     }
+
+   if(v == VETO_NONE)
+     {
+      if(g_armBarsLeft < MathMax(0, InpSignalArmBars))
+         g_nArmLate++;              // needed the window, would have been lost before
+      g_armDir = 0;
+     }
+  }
+
+void Disarm(const string why)
+  {
+   if(g_armDir == 0)
+      return;
+   LogAt(LOGL_DECISIONS, "ARM",
+         StringFormat("%s signal disarmed: %s", DirName(g_armDir), why));
+   g_armDir = 0;
+   g_nArmExpire++;
   }
 
 //+------------------------------------------------------------------+
@@ -1072,6 +1607,8 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir)
 void ManagePositions()
   {
    TrackPrune();
+
+   const double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -1085,20 +1622,26 @@ void ManagePositions()
       const double open   = g_pos.PriceOpen();
       const double curSL  = g_pos.StopLoss();
       const double curTP  = g_pos.TakeProfit();
+      const double vol    = g_pos.Volume();
       const double price  = (dir > 0 ? Bid() : Ask());
 
       int idx = TrackFind(ticket);
       if(idx < 0)
         {
-         //--- restarted with this position open: reconstruct R from its stop
+         //--- Restarted with this position open: reconstruct R from its stop.
+         //--- Break-even is only marked done when the stop is ALREADY at or
+         //--- beyond the entry - blanket-disabling it meant a restart at 0.9R
+         //--- permanently lost break-even protection on that trade.
          const double r = (curSL > 0.0 ? MathAbs(open - curSL) : 0.0);
          if(r <= 0.0)
             continue;
-         TrackAdd(ticket, open, r, dir, true);
+         const bool alreadyBE = (curSL > 0.0 && (curSL - open) * dir >= 0.0);
+         TrackAdd(ticket, open, r, dir, alreadyBE, 0.0);
          idx = TrackFind(ticket);
          LogAt(LOGL_EVENTS, "STOP",
-               StringFormat("adopted position #%I64u, R reconstructed as %s",
-                            ticket, DoubleToString(r, _Digits)));
+               StringFormat("adopted position #%I64u, R reconstructed as %s, break-even %s",
+                            ticket, DoubleToString(r, _Digits),
+                            (alreadyBE ? "already set" : "still pending")));
         }
 
       const double risk = g_track[idx].risk;
@@ -1106,14 +1649,53 @@ void ManagePositions()
          continue;
 
       const double rNow = ((price - open) * dir) / risk;
-      double newSL      = curSL;
-      bool   beApplied  = false;
+
+      //--- Structural partial: bank part of the trade where price is most
+      //--- likely to stall. This is the answer to the give-back problem a pure
+      //--- flip system has - the only exit is the opposite flip, which by
+      //--- definition arrives after the move has already turned over.
+      if(InpUseSR && InpSRTargetPart > 0.0 && !g_track[idx].partialDone &&
+         g_track[idx].target > 0.0 && (price - g_track[idx].target) * dir >= 0.0)
+        {
+         const double cut = ClampLots(vol * InpSRTargetPart);
+         if(cut >= minLot && (vol - cut) >= minLot)
+           {
+            if(g_trade.PositionClosePartial(ticket, cut))
+              {
+               g_track[idx].partialDone = true;
+               g_nPartials++;
+               LogAt(LOGL_EVENTS, "CLOSE",
+                     StringFormat("#%I64u partial %.4f of %.4f lots at level %s (%.2fR) - "
+                                  "runner goes to break-even", ticket, cut, vol,
+                                  DoubleToString(g_track[idx].target, _Digits), rNow));
+              }
+            else
+               LogErr(StringFormat("#%I64u partial close FAILED: %d (%s)", ticket,
+                                   g_trade.ResultRetcode(), g_trade.ResultRetcodeDescription()));
+           }
+         else
+           {
+            //--- too small to split: stop retrying it every tick
+            g_track[idx].partialDone = true;
+            LogAt(LOGL_DECISIONS, "CLOSE",
+                  StringFormat("#%I64u reached its level but %.4f lots cannot be split "
+                               "(broker minimum %.4f) - running the whole position on",
+                               ticket, vol, minLot));
+           }
+        }
+
+      double newSL     = curSL;
+      bool   beApplied = false;
 
       //--- beDone is set only once the stop is actually AT break-even, never
       //--- merely because we tried: the modify below can still be refused by
       //--- the broker's freeze band, and marking it done here would mean
       //--- break-even is never retried.
-      if(InpUseBreakEven && !g_track[idx].beDone && rNow >= InpBEatR)
+      //---
+      //--- Taking the structural partial also arms break-even regardless of R:
+      //--- once part of the trade is banked at a level, the rest runs free.
+      const bool beTrigger = (rNow >= InpBEatR) || g_track[idx].partialDone;
+      if(InpUseBreakEven && !g_track[idx].beDone && beTrigger)
         {
          const double be = open + dir * InpBEoffsetPts * Pt();
          if((dir > 0 && be > curSL) || (dir < 0 && (curSL == 0.0 || be < curSL)))
@@ -1152,7 +1734,7 @@ void ManagePositions()
       if(newSL != curSL && newSL > 0.0)
         {
          //--- never push the stop inside the broker's freeze band
-         const double minD = MinStopDist();
+         const double minD = ModifyDist();
          if(MathAbs(price - newSL) < minD)
             continue;
          newSL = NormPrice(newSL);
@@ -1210,9 +1792,26 @@ void PrintSummary(const string when)
                       g_nStopMods, g_nStopFails));
    LogAt(LOGL_EVENTS, "SUM",
          StringFormat("%s | vetoes: %s", when, vetoes));
+   const double avgRoom = (g_srRoomN > 0 ? g_srRoomSum / g_srRoomN : 0.0);
+
+   LogAt(LOGL_EVENTS, "SUM",
+         StringFormat("%s | armed %d  filled late %d  expired %d  | S/R levels %d  "
+                      "avg room ahead %.2fxATR  veto at %.2f  partials %d",
+                      when, g_nArmed, g_nArmLate, g_nArmExpire, ArraySize(g_sr),
+                      avgRoom, InpSRVetoATR, g_nPartials));
+
+   //--- The S/R veto is the one guard that can quietly stop the strategy dead:
+   //--- set it above the typical spacing between levels and nothing ever has
+   //--- enough room. Say so with the number needed to fix it.
+   if(InpUseSR && InpSRVetoATR > 0.0 && g_veto[VETO_SR] > 0 && g_veto[VETO_SR] >= g_nEntries)
+      LogAt(LOGL_EVENTS, "SUM",
+            StringFormat("%s | WARNING: no-room-to-level rejected %d attempt(s) against %d "
+                         "entries. The nearest level ahead averages %.2fxATR - set "
+                         "InpSRVetoATR below that (or 0 to disable) unless you mean to be "
+                         "this selective.", when, g_veto[VETO_SR], g_nEntries, avgRoom));
    LogAt(LOGL_EVENTS, "SUM",
          StringFormat("%s | closed %d  win %d / loss %d (%.0f%%)  total %+.2fR  avg %+.2fR  "
-                      "| exits: stop %d  tp %d  flip %d  other %d",
+                      "| exits: stop %d  tp %d  ea %d  other %d",
                       when, g_nClosed, g_nWins, nLoss, winPct, g_sumR, avgR,
                       g_closeSL, g_closeTP, g_closeFlip, g_closeOther));
    LogAt(LOGL_EVENTS, "SUM",
@@ -1259,6 +1858,17 @@ int OnInit()
    g_sprSum     = 0.0;
    g_sprMax     = 0.0;
    g_sprN       = 0;
+   g_nArmed     = 0;
+   g_nArmLate   = 0;
+   g_nArmExpire = 0;
+   g_nPartials  = 0;
+   g_srRoomSum  = 0.0;
+   g_srRoomN    = 0;
+   g_sigStall   = 0;
+   g_htfStall   = 0;
+   g_armDir     = 0;
+   g_armLogged  = false;
+   ArrayResize(g_sr, 0);
 
    g_hHull = CreateHullHandle((ENUM_TIMEFRAMES)_Period);
    if(g_hHull == INVALID_HANDLE)
@@ -1266,6 +1876,8 @@ int OnInit()
       LogErr("FATAL: cannot create the indicator handle. Is HullTrend_MT5.ex5 in MQL5\\Indicators ?");
       return INIT_FAILED;
      }
+   if(!AssertHullHandle(g_hHull, "trading-TF"))
+      return INIT_FAILED;
 
    g_htf = PickHTF();
    if(InpUseHTF && g_htf != (ENUM_TIMEFRAMES)_Period)
@@ -1276,6 +1888,8 @@ int OnInit()
          LogErr("FATAL: cannot create the higher-timeframe indicator handle.");
          return INIT_FAILED;
         }
+      if(!AssertHullHandle(g_hHullHTF, "higher-TF"))
+         return INIT_FAILED;
      }
    else
       if(InpUseHTF)
@@ -1299,15 +1913,32 @@ int OnInit()
                       DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), 8),
                       SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE)));
    LogAt(LOGL_EVENTS, "ENV",
-         StringFormat("lots min %.4f step %.4f max %.4f | stopsLevel %d  freezeLevel %d | "
-                      "spread now %.1f pts | fill mode %d",
+         StringFormat("lots min %.4f step %.4f max %.4f (%d volume digits) | stopsLevel %d  "
+                      "freezeLevel %d | spread now %.1f pts | fill mode %d",
                       SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
                       SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
-                      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX),
+                      SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), VolDigits(),
                       (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
                       (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL),
                       SpreadPts(),
                       (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE)));
+
+   //--- A symbol the broker will not let us trade produces order failures at
+   //--- the worst possible moment instead of a refusal at startup.
+   const long tmode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tmode == SYMBOL_TRADE_MODE_DISABLED)
+      LogErr("this symbol is DISABLED for trading - no order will ever be accepted");
+   else
+      if(tmode == SYMBOL_TRADE_MODE_CLOSEONLY)
+         LogErr("this symbol is CLOSE-ONLY - existing positions can be managed but no new "
+                "trade will be accepted");
+      else
+         if(tmode == SYMBOL_TRADE_MODE_LONGONLY)
+            LogAt(LOGL_EVENTS, "ENV", "symbol is LONG-ONLY - every short flip will be rejected");
+         else
+            if(tmode == SYMBOL_TRADE_MODE_SHORTONLY)
+               LogAt(LOGL_EVENTS, "ENV", "symbol is SHORT-ONLY - every long flip will be rejected");
+
    //--- Netting vs hedging decides whether two EAs can share a symbol at all.
    //--- On netting there is one position per symbol, so they cannot: each would
    //--- be trading a position the other also believes it owns.
@@ -1338,10 +1969,27 @@ int OnInit()
 
    LogAt(LOGL_EVENTS, "ENV",
          StringFormat("profile %s | HTF %s | risk %.2f%% | SL %s | closeOnFlip %s | "
-                      "balance %.2f | magic %I64d", DEF_PROFILE_NAME, htfDesc,
+                      "arm %d bars | balance %.2f | magic %I64d", DEF_PROFILE_NAME, htfDesc,
                       InpRiskPercent, EnumToString(InpSLMode),
-                      (InpCloseOnFlip ? "yes" : "no"),
+                      (InpCloseOnFlip ? "yes" : "no"), InpSignalArmBars,
                       AccountInfoDouble(ACCOUNT_BALANCE), InpMagic));
+
+   LogAt(LOGL_EVENTS, "ENV",
+         StringFormat("S/R %s | fractal %d  lookback %d  htf %s  cluster %.2fxATR  "
+                      "minTouches %d | veto %.2fxATR  partial %.0f%%  stop %s",
+                      (InpUseSR ? "on" : "off"), InpSRFractal, InpSRLookback,
+                      (InpSRUseHTF ? "yes" : "no"), InpSRClusterATR, InpSRMinTouches,
+                      InpSRVetoATR, InpSRTargetPart * 100.0,
+                      (InpSRStop ? "yes" : "no")));
+
+   //--- These two changed behaviour in v1.40. Blocking new entries while the
+   //--- open trade rode the very gap the cut-off exists to avoid was a bug, but
+   //--- it is also how every earlier backtest ran - say which mode this is.
+   LogAt(LOGL_EVENTS, "ENV",
+         StringFormat("halts: Friday cut-off %s (flatten %s) | daily loss %.2f%% (flatten %s)",
+                      (InpNoFridayLate ? StringFormat("%02d:00", InpFridayStopHour) : "off"),
+                      (InpFlattenOnFriday ? "YES" : "no"),
+                      InpMaxDailyLossPct, (InpFlattenOnLoss ? "YES" : "no")));
 
    if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
       LogErr("algo trading is disabled for this account/terminal - nothing will be executed");
@@ -1376,6 +2024,8 @@ void OnDeinit(const int reason)
   {
    PrintSummary("final");
 
+   ObjectsDeleteAll(0, "HullSR_");
+
    if(g_hHull    != INVALID_HANDLE)
       IndicatorRelease(g_hHull);
    if(g_hHullHTF != INVALID_HANDLE)
@@ -1394,20 +2044,50 @@ void OnTick()
    //--- management runs every tick: stops must react intrabar
    ManagePositions();
 
-   //--- entries and flip exits run once per closed bar
-   const datetime bt = iTime(_Symbol, _Period, 0);
-   if(bt == g_lastBar)
+   //--- so must the halts - a Friday cut-off that waits for the next closed
+   //--- bar is not a cut-off
+   HaltCheck();
+
+   const datetime bt     = iTime(_Symbol, _Period, 0);
+   const bool     newBar = (bt != g_lastBar);
+
+   if(!newBar)
+     {
+      //--- Intrabar: keep working an armed signal. This is what makes the
+      //--- stop-and-reverse whole - the close and the re-entry are separate
+      //--- server round trips, and the position slot frees up somewhere
+      //--- between two ticks, not on a bar boundary.
+      ServiceArm();
       return;
+     }
 
    HullSignal sig;
    if(ReadSignal(sig) < 0)
-      return;                          // not ready - retry, bar NOT consumed
+     {
+      //--- not ready - retry, bar NOT consumed. A handle that never fills used
+      //--- to look exactly like a strategy that never signals.
+      if(++g_sigStall == STALL_ALARM)
+         LogErr(StringFormat("the Hull/ATR buffers have returned no usable data for %d "
+                             "consecutive ticks - check that HullTrend_MT5 is compiled and "
+                             "that %s history is loaded", STALL_ALARM, _Symbol));
+      return;
+     }
+   g_sigStall = 0;
 
    int htfDir = 0;
    if(ReadHTF(htfDir) < 0)
+     {
+      if(++g_htfStall == STALL_ALARM)
+         LogErr(StringFormat("the %s higher-timeframe buffer has returned no data for %d "
+                             "consecutive ticks - is that timeframe's history available? "
+                             "Nothing will trade until it is.",
+                             EnumToString(g_htf), STALL_ALARM));
       return;                          // same: do not consume the bar
+     }
+   g_htfStall = 0;
 
-   g_lastBar = bt;                     // bar consumed
+   g_lastBar   = bt;                   // bar consumed
+   g_armLogged = false;                // one loud veto per bar from here
    g_barsSeen++;
 
    //--- cost telemetry, sampled once per bar so the average is not dominated
@@ -1420,15 +2100,32 @@ void OnTick()
 
    SizingPreflight(sig.atr);
 
+   //--- levels are rebuilt once per closed bar, before anything consults them
+   BuildSR(sig.atr);
+
+   //--- sample the room the trend direction actually has, so the veto threshold
+   //--- can be judged against the instrument instead of guessed
+   if(InpUseSR && sig.atr > 0.0)
+     {
+      double roomLvl = 0.0;
+      int    roomT   = 0;
+      if(SRNearest(sig.entry, sig.dir, roomLvl, roomT))
+        {
+         g_srRoomSum += MathAbs(roomLvl - sig.entry) / sig.atr;
+         g_srRoomN++;
+        }
+     }
+
    int nLong = 0, nShort = 0;
    const int nPos = OwnPositions(nLong, nShort);
 
    LogAt(LOGL_BARS, "BAR",
-         StringFormat("%s | trend %-4s htf %-4s | hma %s  atr %s  spread %.2fxATR | flip %d  pos %d",
+         StringFormat("%s | trend %-4s htf %-4s | hma %s  atr %s  spread %.2fxATR | "
+                      "flip %d  pos %d  levels %d",
                       TimeToString(iTime(_Symbol, _Period, 1), TIME_DATE | TIME_MINUTES),
                       DirName(sig.dir), (g_hHullHTF != INVALID_HANDLE ? DirName(htfDir) : "off"),
                       DoubleToString(sig.hma, _Digits), DoubleToString(sig.atr, _Digits),
-                      sprATR, (sig.flip ? 1 : 0), nPos));
+                      sprATR, (sig.flip ? 1 : 0), nPos, ArraySize(g_sr)));
 
    if(InpSummaryBars > 0 && g_barsSeen - g_lastSumBar >= InpSummaryBars)
      {
@@ -1436,24 +2133,40 @@ void OnTick()
       PrintSummary("running");
      }
 
-   if(!sig.flip)
-      return;
+   //--- age an armed signal from the previous bar
+   if(g_armDir != 0)
+     {
+      if(sig.dir != g_armDir)
+         Disarm("the indicator turned the other way before it could be filled");
+      else
+         if(--g_armBarsLeft < 0)
+            Disarm(StringFormat("no entry within %d bars", MathMax(0, InpSignalArmBars)));
+     }
 
-   g_nFlips++;
-   LogAt(LOGL_EVENTS, "FLIP",
-         StringFormat("%s | now %s | htf %s | close %s  hma %s  atr %s  spread %.2fxATR  pos %d",
-                      TimeToString(iTime(_Symbol, _Period, 1), TIME_DATE | TIME_MINUTES),
-                      DirName(sig.dir), (g_hHullHTF != INVALID_HANDLE ? DirName(htfDir) : "off"),
-                      DoubleToString(sig.entry, _Digits), DoubleToString(sig.hma, _Digits),
-                      DoubleToString(sig.atr, _Digits), sprATR, nPos));
+   if(sig.flip)
+     {
+      g_nFlips++;
+      LogAt(LOGL_EVENTS, "FLIP",
+            StringFormat("%s | now %s | htf %s | close %s  hma %s  atr %s  spread %.2fxATR  pos %d",
+                         TimeToString(iTime(_Symbol, _Period, 1), TIME_DATE | TIME_MINUTES),
+                         DirName(sig.dir), (g_hHullHTF != INVALID_HANDLE ? DirName(htfDir) : "off"),
+                         DoubleToString(sig.entry, _Digits), DoubleToString(sig.hma, _Digits),
+                         DoubleToString(sig.atr, _Digits), sprATR, nPos));
 
-   //--- The exit is unconditional. Every entry guard below can veto a new
-   //--- trade, but none of them is a reason to keep holding a position the
-   //--- model has just declared wrong.
-   if(InpCloseOnFlip)
-      CloseAgainst(sig.dir);
+      //--- The exit is unconditional. Every entry guard can veto a new trade,
+      //--- but none of them is a reason to keep holding a position the model
+      //--- has just declared wrong.
+      if(InpCloseOnFlip && !CloseAgainst(sig.dir))
+         LogAt(LOGL_DECISIONS, "ARM",
+               "the opposite position is not closed yet - the entry will retry each tick");
 
-   const ENUM_VETO v = TryEnter(sig, htfDir);
-   g_veto[v]++;
+      //--- Arm rather than fire once. See design note 4.
+      g_armSig      = sig;
+      g_armDir      = sig.dir;
+      g_armBarsLeft = MathMax(0, InpSignalArmBars);
+      g_nArmed++;
+     }
+
+   ServiceArm();
   }
 //+------------------------------------------------------------------+

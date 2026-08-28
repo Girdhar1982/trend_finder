@@ -133,13 +133,16 @@ A zero threshold in either mode silently disables the filter, so `OnInit` prints
 
 ### 4.3 Whipsaw filter — confirmation
 
-One counter-trend bar is not a trend change. The indicator keeps a **streak** of consecutive counter-trend bars and only flips when the streak reaches `InpConfirmBars`:
+One counter-trend bar is not a trend change. The indicator keeps a **streak** of counter-trend bars plus the streak's **age**, and only flips when the streak reaches `InpConfirmBars`:
 
-- Bar agrees with the current trend → streak resets to 0.
-- Bar is too flat → streak is **held** (not reset). On low timeframes most bars sit inside the threshold band; resetting here made `InpConfirmBars > 1` impossible to ever satisfy.
-- Bar argues against the trend → streak increments; when `streak ≥ InpConfirmBars` the trend flips and the streak resets.
+- Bar agrees with the current trend → streak and age reset to 0.
+- Bar is too flat → streak is **held** (not reset), and the age keeps running. On low timeframes most bars sit inside the threshold band; resetting here made `InpConfirmBars > 1` impossible to ever satisfy.
+- Bar argues against the trend → streak increments; when `streak ≥ InpConfirmBars` the trend flips and both reset.
+- **The streak expires.** If `age ≥ InpConfirmWindow` while the streak is still partial, it is abandoned.
 
-With `InpConfirmBars = 1` (default) any qualifying counter-trend bar flips immediately; higher values demand a run of opposing bars before the trend changes.
+The window is what makes the hold safe. Holding through flat bars with no time bound meant two counter-trend bars *a day apart* still flipped the trend, which is not what "N bars of confirmation" means to anyone reading the input. `InpConfirmWindow = 0` resolves to `3 × InpConfirmBars`.
+
+With `InpConfirmBars = 1` (default) any qualifying counter-trend bar flips immediately and the window never comes into play; higher values demand a run of opposing bars inside the window before the trend changes.
 
 ---
 
@@ -153,7 +156,9 @@ Per bar, in order:
 4. Apply the streak rules (§4.3) to derive this bar's colour and streak.
 5. If the colour changed, write a reversal arrow (up arrow below the bar's low, or down arrow above the bar's high) and, on a fresh signal, fire the configured alerts.
 
-The state machine is seeded at `g_hmaFirst + 1`; nothing before that is meaningful. The warm-up region is cleared to `EMPTY_VALUE` (arrows) so an EA reading via `CopyBuffer` never receives a phantom signal at price zero — a real past defect.
+**Seeding.** The first bar carrying a Hull value (`g_hmaFirst`) has no earlier value to take a slope against. The seed used to be a hard-coded "up", which is a direction the data never argued for: if the next bar sloped down, the state machine emitted a *down reversal against a prior that did not exist* — a fabricated flip, drawn as a real arrow and handed to an EA as a real signal.
+
+The seed now comes from the first **real** slope, `HMA[g_hmaFirst + 1] − HMA[g_hmaFirst]`, and the state machine only begins deciding at `g_hmaFirst + 2` (`PLOT_DRAW_BEGIN` for both arrow plots). The warm-up region is cleared to `EMPTY_VALUE` (arrows) so an EA reading via `CopyBuffer` never receives a phantom signal at price zero — another real past defect.
 
 ---
 
@@ -168,13 +173,16 @@ The **forming bar** (last index) is live and recomputes on every tick — that i
 
 Alerts fire **once per bar**, keyed to a strictly-increasing `g_lastSignalTime`. Historical signals are never replayed on attach or on a history reload — the marker initialises to the current bar on first run rather than walking backwards and re-alerting.
 
+The cost of that rule is that a reversal landing on the exact bar you attach to is swallowed. Set `InpAlertOnAttach = true` to evaluate that one bar as well; everything older is still never replayed.
+
 ---
 
 ## 7. Reading the chart
 
 - A **green line** = the Hull is rising above the threshold; a **red line** = it is falling. Green/red is decided by slope against the whipsaw threshold, so a flat-but-bullish price structure can still show red.
 - **Up arrow** = bullish reversal (colour flipped to up); **down arrow** = bearish reversal. Arrows only appear on a flip, not on every bar.
-- The DataWindow shows the Hull value, colour index (0/1), arrow values, and the internal streak count per bar.
+- The DataWindow shows the Hull value, colour index (0/1), arrow values, and the internal streak count and streak age per bar.
+- Arrow distance from the bar is `max(InpArrowOffset × point, InpArrowOffATR × ATR)`, so it stays legible across instruments instead of vanishing on one and dwarfing the candle on another.
 
 ---
 
@@ -196,6 +204,7 @@ Alerts fire **once per bar**, keyed to a strictly-increasing `g_lastSignalTime`.
 | `InpATRPeriod` | `14` | ATR mode: ATR period |
 | `InpSlopePoints` | `0.0` | Points mode: minimum slope (points) |
 | `InpConfirmBars` | `1` | Counter-trend bars needed to flip (1 = none) |
+| `InpConfirmWindow` | `0` | Bars a **partial** confirmation stays alive. `0` = `3 × InpConfirmBars`. Irrelevant when `InpConfirmBars = 1` |
 
 ### 3. Reversal arrows
 
@@ -204,7 +213,8 @@ Alerts fire **once per bar**, keyed to a strictly-increasing `g_lastSignalTime`.
 | `InpShowArrows` | `true` | Draw flip arrows |
 | `InpArrowUp` | `233` | Up arrow code (Wingdings) |
 | `InpArrowDown` | `234` | Down arrow code (Wingdings) |
-| `InpArrowOffset` | `10` | Arrow distance from the bar (points) |
+| `InpArrowOffset` | `10` | Arrow distance from the bar (points). Acts as a **floor** when the ATR offset is on |
+| `InpArrowOffATR` | `0.25` | Arrow distance from the bar (× ATR). `0` = points only. A flat point offset is invisible on an index CFD and enormous on a JPY cross |
 
 ### 4. Alerts
 
@@ -216,6 +226,7 @@ Alerts fire **once per bar**, keyed to a strictly-increasing `g_lastSignalTime`.
 | `InpSoundFile` | `alert.wav` | Sound file |
 | `InpEnablePush` | `false` | Mobile push |
 | `InpEnableEmail` | `false` | Email |
+| `InpAlertOnAttach` | `false` | Also evaluate the bar you attach on. Off by default: a reversal sitting on the attach bar is not replayed |
 
 ---
 
@@ -229,7 +240,8 @@ Alerts fire **once per bar**, keyed to a strictly-increasing `g_lastSignalTime`.
 | 3 | Down arrow | plot 2 (`DRAW_ARROW`) | High + offset on a bearish flip, else `EMPTY_VALUE` |
 | 4 | Price | calculations | Selected applied price |
 | 5 | Diff | calculations | `2·LWMA(n/2) − LWMA(n)` |
-| 6 | Streak | calculations | Consecutive counter-trend bars so far |
+| 6 | Streak | calculations | Counter-trend bars banked toward the next flip |
+| 7 | Age | calculations | Bars since that streak opened — the confirmation window counts against this |
 
 Buffers 2–6 are `INDICATOR_CALCULATIONS`, readable by an EA. The EA reads **buffer 1** for the trend, never the arrows — the arrows are derived from the same state machine, so they carry no extra information, and the colour makes the current trend available on every bar (which the higher-timeframe filter needs).
 
@@ -277,6 +289,8 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 | No line drawn | Fewer than ~`n + √n` bars of history. Scroll back or pick a longer-history symbol. |
 | Line is one colour forever | Whipsaw threshold too large, or a zero-threshold mode warning in the log means the filter is actually OFF. |
 | Arrows everywhere | `InpSlopeFilter = NONE` or `InpConfirmBars = 1` with a small threshold. Tighten the filter. |
+| `InpConfirmBars > 1` never seems to fire | The streak now expires after `InpConfirmWindow` bars (default `3 × InpConfirmBars`). Raise the window, or lower the slope threshold so more bars qualify as directional. |
+| `ATR covered only N of M bars` in the log | Those oldest bars ran with **no** slope threshold, i.e. as `SLOPE_FILTER_NONE`. Load more history before trusting a backtest that spans them. |
 | EA logs `FATAL: cannot create the indicator handle` | `HullTrend_MT5.ex5` missing from `MQL5\Indicators\`. |
 | EA never trades | Read the `SUM` line: the `vetoes:` histogram names the rejecting filter (e.g. `htf-disagrees=142 spread=8`). |
 | EA trades differ from chart arrows | The EA reads the colour buffer, not arrows, at shift 1 — check `InpHTFShift` and that you are not reading the forming bar. |
@@ -299,7 +313,7 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 | Change | Also update |
 |---|---|
 | A whipsaw default | The profile table in `HullTrend_EA_Documentation.md` §16 (the EA forwards `InpSlopeATRMul`) |
-| Indicator input order | The 21-argument `iCustom` call in `HullTrendEA_Core.mqh`'s `CreateHullHandle()` — group placeholders included |
+| Indicator input order | The **24**-argument `iCustom` call in `HullTrendEA_Core.mqh`'s `CreateHullHandle()` — group placeholders included — **and** `HULL_ICUSTOM_ARGS`, which the EA asserts against the live handle at `OnInit` |
 | Buffer order | The buffer contract in §9 **and** the EA's `ReadSignal()` buffer indices |
 | Anything in the state machine | The streak/flip explanation in §4–§5 and the EA's flip-detection (`col[1] != col[0]`) |
 | A new per-bar log line | The log format table in `HullTrend_EA_Documentation.md` §15 |
@@ -308,6 +322,14 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 
 ## 16. Version history
 
+### Indicator 2.30
+- **Fixed:** the state machine no longer fabricates a flip at the warm-up boundary. The seed is taken from the first real slope instead of a hard-coded "up", and colouring starts one bar later (§5).
+- **Added:** `InpConfirmWindow` — a partial confirmation streak now expires instead of living forever. Without it, `InpConfirmBars > 1` did not mean what it says (§4.3).
+- **Added:** `InpArrowOffATR` — volatility-scaled arrow offset, with the point setting as a floor.
+- **Added:** `InpAlertOnAttach` — optionally evaluate the attach bar, which was previously always swallowed.
+- A short ATR copy now prints a warning. Those bars run with **no** slope threshold, i.e. as a different indicator; it used to be silent.
+- New calculations buffer 7 (streak age). Buffer count 7 → 8; `iCustom` argument count 21 → **24**.
+
 ### Indicator 2.20
 - **Fixed:** the warm-up region now clears arrow buffers to `EMPTY_VALUE` — they previously held `0.0`, invisible on the chart but handed to an EA by `CopyBuffer` as a signal at price zero.
 - LWMAs rolled forward to O(1) per bar (was O(period)).
@@ -315,6 +337,14 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 - Alerts keyed to a strictly-increasing signal time — no replays on attach or history reload.
 - `OnInit` prints the resolved configuration (`Hull Trend config: …`) so a shifted `iCustom` caller is visible in the log.
 - ATR handle failure degrades to an unfiltered line with a printed warning.
+
+### EA 1.40
+- **Fixed (high):** a stop-and-reverse could leave the account flat. The flip closed the old position and `TryEnter` then read a position list the broker had not updated yet, vetoing the reversal as `pos-limit` — and the bar was already consumed, so it never retried. Flips now **arm** a signal that re-tests its guards every tick for `InpSignalArmBars` bars (§ EA doc).
+- **Fixed (high):** `NormalizeDouble(lots, 2)` destroyed sizing on any symbol with a volume step finer than 0.01. Volume digits are now derived from `SYMBOL_VOLUME_STEP`.
+- **Fixed:** fixed lots bypassed every broker constraint; the lot cap was applied after step rounding; the take profit was derived from the pre-widened stop; `OrderCalcMargin` failure was the one silent reject path; the daily-loss baseline included floating P&L; adopted positions could never reach break-even; the freeze level was conflated with the stops level on initial placement.
+- **Added:** support and resistance — clustered pivot fractals used to veto entries with no room, to take a structural partial, and to place the swing stop. Never to generate an entry.
+- **Added:** Friday cut-off and daily-loss halt can now **close** open positions, not just block new ones.
+- **Added:** watchdogs for a signal or HTF handle that never fills, and a startup assertion on the `iCustom` argument count.
 
 ### EA 1.30
 - Three profiles around one shared core (`HullTrendEA_Core.mqh`): generic, forex (M5+, Friday cut-off), crypto (H1+, 2.25×ATR stop, 24/7).

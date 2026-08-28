@@ -9,9 +9,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "1.30"
+#property version   "1.40"
 #property description "Hull Trend flip EA - forex profile (M5+, 1.5xATR stop, Friday cutoff)."
 #property description "Shared core with the crypto build; only the defaults differ."
+#property description "v1.40: armed signals, S/R veto and structural partials."
 
 #define HULL_PROFILE_FOREX
 #include "HullTrendEA_Core.mqh"

@@ -30,6 +30,7 @@ Version 1.30 · Last updated 2026-08-27
 20. [Troubleshooting](#20-troubleshooting)
 21. [Known limitations](#21-known-limitations)
 22. [Version history](#22-version-history)
+23. [Support and resistance](#23-support-and-resistance)
 
 ---
 
@@ -79,7 +80,9 @@ Rationale baked into the crypto profile: crypto ranges are wider (flip less — 
 
 ## 4. The `iCustom` contract
 
-`HullTrend_MT5` declares **17 input parameters spread over 4 `input group` headers**. `input group` headers are real positional slots, so the call passes **21 arguments: 17 values + 4 placeholders**:
+`HullTrend_MT5` declares **20 input parameters spread over 4 `input group` headers**. `input group` headers are real positional slots, so the call passes **24 arguments: 20 values + 4 placeholders**.
+
+This is not folklore — it is verified against this build. In the terminal's `MQL5/Logs/` directory, an EA-created handle and a hand-attached copy of the same indicator print different `atrMul` values on the same bar: the EA's profile value reaches the indicator only because the group placeholders are there.
 
 ```
 iCustom(_Symbol, tf, "HullTrend_MT5",
@@ -92,22 +95,31 @@ iCustom(_Symbol, tf, "HullTrend_MT5",
         InpATRPeriod,          //  7
         InpSlopePoints,        //  8
         InpConfirmBars,        //  9
-        0,                     // 10 group "Reversal arrows"
-        false,                 // 11 show arrows   - the EA reads buffers
-        233,                   // 12 up arrow code
-        234,                   // 13 down arrow code
-        10,                    // 14 arrow offset
-        0,                     // 15 group "Alerts"
-        0,                     // 16 signal bar    - closed bar
-        false,                 // 17 pop-up alerts - the EA logs instead
-        false,                 // 18 sound
-        "",                    // 19 sound file
-        false,                 // 20 push
-        false                  // 21 email
+        InpConfirmWindow,      // 10
+        0,                     // 11 group "Reversal arrows"
+        false,                 // 12 show arrows   - the EA reads buffers
+        233,                   // 13 up arrow code
+        234,                   // 14 down arrow code
+        10,                    // 15 arrow offset, points
+        0.0,                   // 16 arrow offset, ATR - off: no ATR handle needed
+        0,                     // 17 group "Alerts"
+        0,                     // 18 signal bar    - closed bar
+        false,                 // 19 pop-up alerts - the EA logs instead
+        false,                 // 20 sound
+        "",                    // 21 sound file
+        false,                 // 22 push
+        false,                 // 23 email
+        false                  // 24 alert on attach
        );
 ```
 
-Getting the placeholder count wrong fails **silently**: every value shifts one slot left and the indicator simply runs with the wrong settings. The indicator prints its resolved configuration at `OnInit` (`Hull Trend config: …`) precisely so a shift is visible in the log. Do not reorder, insert or delete an input or a group header.
+Getting the placeholder count wrong fails **silently**: every value shifts one slot left and the indicator simply runs with the wrong settings. Three things defend against that now:
+
+1. The indicator prints its resolved configuration at `OnInit` (`Hull Trend config: …`), so a shift is visible in the log.
+2. The EA declares `HULL_ICUSTOM_ARGS` (currently `24`) and checks it against the live handle with `IndicatorParameters()` at `OnInit`. A definite mismatch is **fatal** — the EA refuses to start rather than trade a mis-parameterised signal. If the terminal cannot answer the query the EA warns and continues, pointing you at check 1.
+3. `HullTrend_MT5.mq5` carries the count in a comment above its input block.
+
+Do not reorder, insert or delete an input or a group header without updating all three.
 
 The EA deliberately passes `show arrows = false` and all alerts off — it reads buffers and logs itself.
 
@@ -152,8 +164,24 @@ On every new closed bar:
 
 1. Read the signal. If a **flip** occurred:
    - **Exit first, unconditionally** — close all positions against the new direction (`CloseAgainst`). No entry guard can veto this: the model has declared the position wrong.
-   - Then attempt a new entry in the flip direction through the veto ladder (§11).
+   - **Arm** the signal, then attempt entry through the veto ladder (§11).
 2. A flip that is vetoed still prints a `VETO` line and counts in the summary — a veto is not silence.
+
+### Armed signals
+
+A flip used to be a single shot: one attempt, on the flip bar, and the bar was consumed either way. Two failures followed from that.
+
+- **The reversal could be lost entirely.** `CloseAgainst` and the new order are separate server round trips. If the close had not been booked when `TryEnter` read `PositionsTotal()`, the entry was vetoed as `pos-limit` — so the EA closed the old trade and never opened the new one. With `InpMaxPositions = 1` that is the *default* outcome of any close that does not settle instantly, and it is the worst half of a stop-and-reverse to execute on its own.
+- **A momentary HTF disagreement discarded the whole move.** If the higher timeframe disagreed on the flip bar and agreed two bars later with the trend still intact, no trade ever happened until the next flip — which is the exit.
+
+A flip now arms `g_armSig` for `InpSignalArmBars` bars (default `3`; `0` = flip bar only). The guards are re-tested:
+
+- **on every tick** while armed, quietly — this is what closes the reversal race, because the position slot frees up between ticks, not on a bar boundary;
+- **once per closed bar**, loudly — that is the attempt which prints a `VETO` line and counts in the histogram.
+
+The arm is dropped when the entry fills, when the indicator turns the other way first, or when the window runs out (`ARM` log line). Nothing extends the risk: `g_armSig.entry` stays pinned to the **flip bar's close**, so as price runs away the `drift` guard rejects the trade on its own. The arm window lets a *good* entry through late; it does not chase a bad one.
+
+Because the guards are re-tested per bar rather than per flip, the `vetoes:` histogram counts **attempts**, not flips. Totals above the flip count are expected.
 
 The opposite flip is therefore the primary exit (`DEAL_REASON_EXPERT`, counted as `flip`). SL and TP hits (`stop-loss`, `take-profit`) are secondary. An optional `InpTPmulR` take-profit (0 = none) lets you exit early when a target is reached; otherwise only the flip or the stop ends the trade.
 
@@ -166,12 +194,12 @@ The opposite flip is therefore the primary exit (`DEAL_REASON_EXPERT`, counted a
 | Mode | Stop level | Notes |
 |---|---|---|
 | `SL_ATR` (default) | `fill − dir × InpSLmulATR × atr` | Simple volatility multiple |
-| `SL_SWING` | swing low/high over `InpSwingBars`, **padded** by `InpSLpadATR × atr` | Recent structure beyond the fill; `iLowest`/`iHighest` measured from shift 1 |
+| `SL_SWING` | nearest **S/R level** on the protective side, padded by `InpSLpadATR × atr`; falls back to the swing low/high over `InpSwingBars` | A clustered level price has turned at repeatedly is a better stop than an extreme that was touched once (§23). Set `InpSRStop = false` for the old pure-swing behaviour. The fallback also applies when the nearest level is more than 3×ATR away |
 | `SL_HMA` | `hma − dir × InpSLpadATR × atr` | The Hull line itself is the thesis — if price is through it, the trade is wrong by its own definition |
 
-`InpTPmulR > 0` places `fill + dir × InpTPmulR × risk` as the take-profit.
+`InpTPmulR > 0` places `fill + dir × InpTPmulR × risk` as the take-profit. It is derived **after** the stop has been widened to the broker's minimum distance — deriving it first left the take-profit claiming an R multiple the trade no longer had.
 
-The stop is then widened to the broker's minimum distance if needed and normalised to `SYMBOL_DIGITS`. A stop already on the **wrong side** of the fill means price has run through the protective level — the entry is vetoed (`stop-wrong-side`).
+The stop is widened using `SYMBOL_TRADE_STOPS_LEVEL` only. The **freeze level** is a different rule — it governs how close to price an *existing* order may be touched — and folding it in here made every initial stop wider than the broker actually required. It still applies to stop *modifications* (§13). The result is normalised to `SYMBOL_DIGITS`. A stop already on the **wrong side** of the fill means price has run through the protective level — the entry is vetoed (`stop-wrong-side`).
 
 ---
 
@@ -210,11 +238,12 @@ Every reject path returns a named `ENUM_VETO` instead of just logging, so the su
 | 6 | `trade-cap` | `g_tradesToday ≥ InpMaxTradesPerDay` |
 | 7 | `bar-gap` | `InpMinBarsGap` since the last entry |
 | 8 | `spread` | Live spread above `InpMaxSpreadATR × ATR` **or** above `InpMaxSpreadPts` (0 = off). The ATR-scaled guard keeps its meaning across instruments and volatility regimes |
-| 9 | `stop-wrong-side` | The computed stop is already through the fill (§8) |
-| 10 | `drift` | Price has run more than `InpMaxDriftR × risk` past the signal close — the assumed R:R is gone |
-| 11 | `lots-too-small` | Risk % rounds below the broker minimum lot |
-| 12 | `margin` | Order needs > 90% of free margin |
-| 13 | `order-failed` | `PositionModify`/`Buy`/`Sell` retcode non-zero |
+| 9 | `no-room-to-level` | The nearest S/R level ahead is closer than `InpSRVetoATR × ATR` (§23) |
+| 10 | `stop-wrong-side` | The computed stop is already through the fill (§8) |
+| 11 | `drift` | Price has run more than `InpMaxDriftR × risk` past the signal close — the assumed R:R is gone. Also what expires a stale armed signal |
+| 12 | `lots-too-small` | Risk % rounds below the broker minimum lot, or fixed lots clamp below it |
+| 13 | `margin` | Order needs > 90% of free margin, or `OrderCalcMargin` failed (which now logs) |
+| 14 | `order-failed` | `Buy`/`Sell` retcode non-zero |
 
 The entry log line records everything needed to reconstruct the decision offline: size, levels, the volatility they were scaled to, spread paid, drift, risk % and balance.
 
@@ -235,14 +264,16 @@ Break-even and trailing are expressed in **R** — multiples of the original sto
 Both run from `ManagePositions()`, which executes **every tick** — stops must react intrabar.
 
 **Break-even** (one-shot):
-- Triggered when `rNow ≥ InpBEatR`; target stop = entry ± `InpBEoffsetPts × point` (the offset covers costs).
+- Triggered when `rNow ≥ InpBEatR`, **or** as soon as the structural partial has been taken (§23) regardless of R — once part of the trade is banked at a level, the rest should run free. Target stop = entry ± `InpBEoffsetPts × point` (the offset covers costs).
 - `beDone` is set only once the stop is actually **at** break-even, never merely because we tried — a freeze-band refusal must not prevent a retry.
 - Never throttled.
 
 **Trailing** (throttled):
 - Triggered when `rNow ≥ InpTrailStartR`; trail level = `price − dir × InpTrailDistR × risk`.
 - Advances only after a minimum move of `InpTrailStepR × risk`, measured against the stop the **broker currently holds** — not against a stop staged on the same tick (a break-even move would otherwise satisfy the step for the trail, and the throttle would do nothing on the one tick where both fire). The step costs nothing in placement: the stop ends up in the same place, in fewer hops, without flooding the broker with per-tick `PositionModify` calls.
-- Never pushes the stop into the freeze band.
+- Never pushes the stop into the freeze band. Modification proximity uses `max(SYMBOL_TRADE_STOPS_LEVEL, SYMBOL_TRADE_FREEZE_LEVEL)`, unlike initial placement (§8), which uses the stops level alone.
+
+**Adopted positions.** A position open across a restart has its R reconstructed from the current stop. Break-even is now marked done only when that stop is **already at or beyond the entry**; blanket-disabling it meant a restart at 0.9R permanently lost break-even protection on that trade.
 
 Each successful move logs `#ticket break-even|trail -> price (+X.XXR advance) at X.XXR open`.
 
@@ -250,10 +281,21 @@ Each successful move logs `#ticket break-even|trail -> price (+X.XXR advance) at
 
 ## 14. Daily guards
 
-- **`RollDay()`** — runs every tick; on a new server-trading day snapshots equity, resets the trade counter, un-blocks the day.
-- **`DailyLossHit()`** — equity down ≥ `InpMaxDailyLossPct` from day-start (floating losses count) blocks new entries for the rest of the day (0 = off). Open positions are still managed.
+- **`RollDay()`** — runs every tick; on a new server-trading day snapshots the **balance**, resets the trade counter, un-blocks the day. Equity at midnight carries whatever is floating on an open position, so a day that opened inside a drawdown started from an artificially low baseline and the halt fired late.
+- **`DailyLossHit()`** — live equity down ≥ `InpMaxDailyLossPct` from the day's **opening balance** (floating losses count) blocks new entries for the rest of the day (0 = off).
 - **`TimeAllowed()`** — optional hours window (server time; wraps midnight) plus `InpNoFridayLate` cut-off after `InpFridayStopHour`.
 - **`InpMaxTradesPerDay`** — cap on new entries per day (0 = unlimited).
+
+### Halts now close, not just block
+
+Blocking new entries while leaving the open trade to ride the very weekend gap the Friday cut-off exists to avoid was never the intent of that input. `HaltCheck()` runs **every tick** — a cut-off that waits for the next closed bar is not a cut-off — and flattens everything the EA owns when:
+
+- `InpFlattenOnFriday` (default **true**) and the Friday cut-off has passed, or
+- `InpFlattenOnLoss` (default **true**) and the daily loss limit has been hit.
+
+> **This changes results against every backtest run before v1.40.** Set both to `false` to reproduce the old behaviour. The `ENV` block prints which mode is active at startup (`halts: Friday cut-off 19:00 (flatten YES) | daily loss 3.00% (flatten YES)`).
+
+Flattening also disarms any pending signal.
 
 ---
 
@@ -266,6 +308,7 @@ Every line is `HullEA | TAG | message` — one record per line, so the whole Exp
 | `ENV` | events | Once at startup: symbol/broker facts, account mode, profile, HTF choice, sizing pre-flight |
 | `BAR` | bars (3) | One line per closed bar — noisy on M1, short diagnostic runs only |
 | `FLIP` | events | The indicator changed trend |
+| `ARM` | decisions | A flip is waiting for its guards, or has been disarmed (§7) |
 | `ENTRY` | events | An order was placed (with all decision inputs) |
 | `VETO` | decisions | A flip was not traded, and why |
 | `STOP` | events | A stop was moved (break-even or trailing) |
@@ -279,12 +322,19 @@ Log levels (`InpLogLevel`): `0` off, `1` events, `2` decisions (default), `3` ba
 
 ```
 SUM | running | bars 240  flips 3  entries 2  open 1  stopMods 4 (0 failed)
-SUM | running | vetoes: htf-disagrees=142  spread=8  same-dir=5
-SUM | running | closed 1  win 1 / loss 0 (100%)  total +2.40R  avg +2.40R | exits: stop 0  tp 0  flip 1  other 0
+SUM | running | vetoes: htf-disagrees=142  spread=8  no-room-to-level=11  same-dir=5
+SUM | running | armed 3  filled late 1  expired 1  | S/R levels 14  avg room ahead 1.31xATR  veto at 0.75  partials 1
+SUM | running | closed 1  win 1 / loss 0 (100%)  total +2.40R  avg +2.40R | exits: stop 0  tp 0  ea 1  other 0
 SUM | running | spread avg 0.11 x ATR  max 0.22 x ATR  (a flip system needs this well under 0.25 to be viable)
 ```
 
 The veto histogram names the rejecting filter; the spread figure tells you whether the timeframe can pay its costs.
+
+Three numbers on the arm/S-R line are worth reading every run:
+
+- **`filled late`** — entries that only happened because of the arm window. If this is a large share of entries, `InpSignalArmBars` is doing real work; if it is zero, the guards were never the bottleneck.
+- **`avg room ahead`** — the mean distance, in ATR, from the signal-bar close to the nearest level in the trend direction. **Set `InpSRVetoATR` below this**, or the veto rejects almost everything.
+- If `no-room-to-level` rejections outnumber entries, the `SUM` block prints an explicit warning naming the observed average — that veto is the one guard capable of silently stopping the strategy dead, so it is instrumented to say so.
 
 ---
 
@@ -307,6 +357,8 @@ The veto histogram names the rejecting filter; the spread figure tells you wheth
 | `InpATRPeriod` | `14` | ATR period |
 | `InpSlopePoints` | `0.0` | Points mode: minimum slope |
 | `InpConfirmBars` | `1` | Counter-trend bars needed to flip |
+| `InpConfirmWindow` | `0` | Bars a partial confirmation stays alive (`0` = `3 × InpConfirmBars`) |
+| `InpSignalArmBars` | `3` | Bars a vetoed flip keeps retrying its guards (`0` = flip bar only). See §7 |
 
 ### B. Higher-timeframe filter
 
@@ -358,10 +410,30 @@ The veto histogram names the rejecting filter; the spread figure tells you wheth
 | `InpStartHour` / `InpEndHour` | `7` / `20` | Wraps midnight correctly |
 | `InpNoFridayLate` | profile | No new trades late Friday |
 | `InpFridayStopHour` | `19` | Friday cut-off hour |
-| `InpMaxDailyLossPct` | profile | Halt for the day after this % loss (0 = off) |
+| `InpFlattenOnFriday` | `true` | **Also close** open trades at the cut-off. `false` reproduces pre-1.40 behaviour |
+| `InpMaxDailyLossPct` | profile | Halt for the day after this % loss of the day's opening **balance** (0 = off) |
+| `InpFlattenOnLoss` | `true` | **Also close** open trades when the limit hits. `false` reproduces pre-1.40 behaviour |
 | `InpMaxTradesPerDay` | `0` | Max new trades per day (0 = unlimited) |
 
-### F. Logging
+### F. Support and resistance
+
+See §23 for what these do and how to tune them.
+
+| Input | Default | Notes |
+|---|---|---|
+| `InpUseSR` | `true` | Build S/R levels from pivot fractals |
+| `InpSRFractal` | `3` | Bars each side of a pivot. Also the confirmation lag: a level appears 3 closed bars after the bar that made it |
+| `InpSRLookback` | `400` | Bars scanned on the trading TF (HTF scans `/4`) |
+| `InpSRUseHTF` | `true` | Also scan the resolved higher timeframe |
+| `InpSRClusterATR` | `0.50` | Merge pivots closer than this × ATR into one level |
+| `InpSRMinTouches` | `2` | Ignore levels with fewer touches. `1` admits every single bar extreme and will flood the list |
+| `InpSRMaxAgeBars` | `0` | Drop levels older than N bars (`0` = `20 × InpHMAPeriod`) |
+| `InpSRVetoATR` | profile | Veto if the level ahead is nearer than this × ATR (`0` = off). **Check it against `avg room ahead` in the `SUM` line** |
+| `InpSRTargetPart` | `0.50` | Fraction of the position closed at the level ahead (`0` = off) |
+| `InpSRStop` | `true` | `SL_SWING` places the stop at an S/R level instead of the raw extreme |
+| `InpSRDraw` | `false` | Draw the levels as dotted horizontal lines (orange at 3+ touches). Use it once to sanity-check, then turn it off |
+
+### G. Logging
 
 | Input | Default | Notes |
 |---|---|---|
@@ -383,6 +455,7 @@ The veto histogram names the rejecting filter; the spread figure tells you wheth
 | `InpRiskPercent` | 0.50 | 0.50 | 0.50 |
 | `InpNoFridayLate` | true | true | false |
 | `InpMaxDailyLossPct` | 3.0 | 3.0 | 4.0 |
+| `InpSRVetoATR` | 0.75 | 0.75 | 0.60 |
 | `InpMagic` | 20260826 | 20260827 | 20260828 |
 | `InpComment` | HullTrend | HullFX | HullCrypto |
 
@@ -407,24 +480,66 @@ The veto histogram names the rejecting filter; the spread figure tells you wheth
 | `sizing preflight: … rounds to ZERO lots` | Risk % below the minimum-lot floor; the `ERROR` line gives the exact % needed. |
 | EA trades differ from chart arrows | The EA reads the **colour buffer** at shift 1, not arrows. Check `InpHTFShift` and that no other indicator copies are at play. |
 | `WARNING: the X profile expects M5/H1 or higher` | Chart below the profile minimum. Watch the `SUM` spread line — on M1 retail FX it won't clear costs. |
-| `adopted position #…, R reconstructed` | An open position survived an EA restart; it is trailed but never re-break-even'd. Expected. |
+| `adopted position #…, R reconstructed` | An open position survived an EA restart. R is reconstructed from its current stop; the same line says whether break-even is `already set` or `still pending`. Expected. |
 | Log shows `insufficient margin` / `margin:` veto | Order refused by the 90% free-margin pre-check. |
 | `stop modify failed` | Freeze band or broker refusal; logged with the retcode. Counted in `SUM` (`stopMods X (N failed)`). |
+| EA stopped trading after upgrading to 1.40 | Check the `SUM` line for `no-room-to-level`. If it outnumbers entries, `InpSRVetoATR` is above the typical level spacing — the same line prints `avg room ahead`; set the veto below it, or `0` to disable (§23). |
+| Results changed after upgrading to 1.40 | Expected. Halts now flatten open positions by default. Set `InpFlattenOnFriday` and `InpFlattenOnLoss` to `false` to reproduce the old behaviour (§14). |
+| `FATAL: the trading-TF handle reports N parameters` | The indicator's input list and `CreateHullHandle()` have drifted apart. Re-sync both and `HULL_ICUSTOM_ARGS` (§4). |
+| `no usable data for 100 consecutive ticks` | The indicator is not compiled, or the symbol/timeframe history is not loaded. Nothing trades until it is. |
+| Vetoes total more than flips | Expected since 1.40: guards are re-tested per bar while a signal is armed, so the histogram counts attempts (§7). |
 
 ---
 
 ## 21. Known limitations
 
 1. **Cost-bound by construction.** A flip system pays the spread on every reversal; on retail M1 FX it cannot clear its own costs.
-2. **R tracking does not survive restarts faithfully.** Positions open across a restart have R reconstructed from the current stop; adopted positions are trailed but never re-break-even'd.
+2. **R tracking does not survive restarts faithfully.** Positions open across a restart have R reconstructed from the current stop, which is only the original risk if nothing has moved it yet. Adopted positions also get no structural target.
 3. **`iCustom` parameters are positional.** Reordering, inserting or deleting an indicator input or group header silently mis-feeds parameters. Read the indicator's `Hull Trend config:` line at `OnInit`.
 4. **The HTF filter reads the indicator's colour**, so it inherits the indicator's whipsaw/confirmation settings on the HTF as well.
 5. **Single-symbol.** No correlation awareness, no portfolio-level risk.
-6. **Not validated as profitable.** Nothing here has been validated as profitable on live markets.
+6. **S/R levels are geometry, not statistics.** A pivot cluster has no null distribution and no significance test; `touches` is a count, not evidence. The levels are used to veto and to take profit — never to enter — precisely because that is all the weight they can carry.
+7. **The structural partial makes the reported R approximate.** A scaled-out position has two exit deals; the `CLOSE` line measures R against the **last** one and marks it `[scaled out]`. Treat it as the runner's result, not the blended one.
+8. **Not validated as profitable.** Nothing here has been validated as profitable on live markets. The v1.40 changes fix defects and add instrumentation; none of them is evidence of an edge.
 
 ---
 
 ## 22. Version history
+
+### 1.40
+
+**Fixed — high severity**
+
+- **A stop-and-reverse could leave the account flat.** The flip closed the old position, then `TryEnter` read a position list the broker had not updated yet and vetoed the reversal as `pos-limit` — with the bar already consumed, so it never retried. Flips now arm a signal that re-tests its guards every tick (§7). `CloseAgainst()` returns whether the close actually settled.
+- **`NormalizeDouble(lots, 2)` destroyed sizing below a 0.01 volume step.** On a 0.001-step symbol a correct 0.003 lots became `0.00` (rejected) and 0.005 became 0.01 — double the intended risk. Volume digits are derived from `SYMBOL_VOLUME_STEP`.
+
+**Fixed — medium and low**
+
+- Fixed lots bypassed every broker constraint (no min/step/max clamp) — they now go through the same `ClampLots()` as risk-based sizing.
+- The lot cap was applied *after* step rounding, so a cap that was not a step multiple produced an off-step volume.
+- The take-profit was derived from the pre-widened stop, so it no longer represented `InpTPmulR` R once the broker minimum kicked in.
+- A single-shot flip discarded the whole move when the HTF disagreed on the flip bar only (§7).
+- A signal or HTF handle that never filled stalled the EA silently and forever. Both now trip a watchdog after 100 consecutive not-ready ticks.
+- `OrderCalcMargin` failure was the one reject path with no log line at all; `VETO_MARGIN` appeared in the summary unexplained.
+- The daily-loss baseline was equity at midnight, which included floating P&L (§14).
+- Adopted positions were flagged break-even-done unconditionally, so a restart at 0.9R permanently lost break-even protection (§13).
+- Initial stop placement conflated `SYMBOL_TRADE_FREEZE_LEVEL` with `SYMBOL_TRADE_STOPS_LEVEL` (§8).
+- No `SYMBOL_TRADE_MODE` check at startup: a disabled, close-only or one-side-only symbol produced order failures instead of a startup error.
+
+**Added**
+
+- **Support and resistance** (§23): clustered pivot fractals used to veto entries with no room, take a structural partial, and place the swing stop. Never to generate an entry.
+- **Armed signals** (§7), `InpSignalArmBars`.
+- Friday cut-off and daily-loss halt can now **close** open positions (`InpFlattenOnFriday`, `InpFlattenOnLoss`, both default `true`).
+- `HULL_ICUSTOM_ARGS` is asserted against the live handle via `IndicatorParameters()` at `OnInit`; a definite mismatch is fatal (§4).
+- `SUM` reports arm statistics, S/R level count, average room ahead, and warns when the S/R veto is rejecting more than it admits.
+
+**Behaviour changes to be aware of**
+
+- Halts flatten by default — results differ from every earlier backtest. Set both flatten inputs to `false` to reproduce the old behaviour.
+- The veto histogram counts **attempts**, not flips (§7).
+- `iCustom` argument count 21 → **24** (indicator 2.30 adds three inputs).
+- `CLOSE` reason `flip` is now labelled `ea-exit`: the EA closes on halts as well as on flips, and calling both "flip" was wrong.
 
 ### 1.30
 - **Profiles.** One shared core (`HullTrendEA_Core.mqh`), three front doors: generic, forex (M5+, Friday cut-off, magic `20260827`, comment `HullFX`), crypto (H1+, 2.25×ATR stop, 0.25 slope mult, 0.30 spread guard, 24/7, magic `20260828`, comment `HullCrypto`).
@@ -433,6 +548,89 @@ The veto histogram names the rejecting filter; the spread figure tells you wheth
 
 ### 1.20
 - Initial shared-core release (base for the profile split in 1.30).
+
+---
+
+## 23. Support and resistance
+
+### What it is for
+
+The EA's structural weakness is stated in its own design notes: it is a stop-and-reverse
+trend follower whose only exit is the opposite flip. A flip arrives *after* the move has
+already turned over, so every winning leg gives back the distance from its peak to the
+reversal. S/R is aimed at that, and at entries taken into a wall.
+
+Three uses, in descending order of expected value:
+
+1. **Entry veto.** At entry, measure the distance to the nearest level in the trade's
+   direction. If it is less than `InpSRVetoATR × ATR`, veto (`no-room-to-level`). A long
+   entered a fraction of an ATR under a level that has already turned price away twice is
+   taking a full-size stop for a truncated move.
+2. **Structural partial.** When price reaches the level that was ahead at entry, close
+   `InpSRTargetPart` of the position and put the runner at break-even. A fixed R target on a
+   trend follower is wrong — which is why `InpTPmulR` is off by default — but a
+   *structural* target is not.
+3. **Stop placement.** `SL_SWING` uses the nearest level on the protective side rather than
+   the raw extreme of the last `InpSwingBars` bars. An extreme touched once is not the same
+   as one touched three times.
+
+**S/R is never used to generate an entry.** Bounce trading is a different strategy with a
+different edge, a different stop and a different cost profile; mixing it in would make both
+untestable.
+
+### How the levels are built
+
+Rebuilt once per closed bar, in `BuildSR()`:
+
+1. **Pivot fractals.** A pivot high is a bar whose high exceeds the `InpSRFractal` highs on
+   each side; a pivot low is the mirror. Scanned on the trading timeframe and, when
+   `InpSRUseHTF`, on the resolved HTF over the same wall-clock window.
+2. **Never repaints.** A pivot at shift `i` is only examined once the `k` bars to its right
+   have closed, so the scan starts at shift `k + 1` (shift 0 is still forming). A level
+   cannot appear, move or vanish after the fact — which is the whole reason to prefer
+   fractals over anything fitted.
+3. **Clustered.** Pivots within `InpSRClusterATR × ATR` of each other merge into one
+   level whose price is the touch-weighted running mean and whose strength is the touch
+   count. Highs and lows go into **one** list: a broken resistance becomes support, and a
+   price that is both a pivot high and a pivot low is one strong level, not two weak ones.
+4. **Aged out.** Anything older than `InpSRMaxAgeBars` (default `20 × InpHMAPeriod`) is
+   dropped.
+5. **Filtered at query time.** `SRNearest()` ignores levels below `InpSRMinTouches`.
+
+### Tuning it — read the numbers, do not guess
+
+`InpSRVetoATR` is the one guard in this EA capable of silently stopping the strategy dead.
+Set it above the typical spacing between levels and *nothing* ever has enough room; the only
+symptom is an EA that no longer trades. So it is instrumented:
+
+```
+SUM | running | armed 3  filled late 1  expired 1  | S/R levels 14  avg room ahead 1.31xATR  veto at 0.75  partials 1
+```
+
+- **`S/R levels`** — how many survive clustering and the touch filter. Dozens means
+  `InpSRMinTouches` is too low or `InpSRClusterATR` too tight; two or three means the
+  opposite.
+- **`avg room ahead`** — the mean distance from the signal-bar close to the nearest level
+  in the trend direction. **`InpSRVetoATR` must sit below this**, usually well below.
+- If `no-room-to-level` rejections outnumber entries, the `SUM` block prints an explicit
+  warning with the number needed to fix it.
+
+Recommended procedure, one change at a time against the same backtest:
+
+1. Run once with `InpSRVetoATR = 0` (veto off, everything else on). Note `avg room ahead`
+   and the baseline result.
+2. Set `InpSRVetoATR` to roughly half the observed average. Re-run and compare entries, win
+   rate **and** total R — not total R alone.
+3. Only then touch `InpSRTargetPart`, and only then `InpSRStop`.
+4. Set `InpSRDraw = true` once, in visual mode, to confirm the levels land where you would
+   have drawn them by hand. Then turn it off.
+
+### The cheaper experiment to run first
+
+Before spending time on S/R, sweep `InpTrailStartR` / `InpTrailDistR`, or try a plain
+chandelier exit. If a volatility trail already captures most of the give-back, S/R is a lot
+of surface area for a small marginal gain. Structure earns its place only if it beats that
+baseline.
 
 ---
 

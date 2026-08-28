@@ -5,14 +5,15 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "2.20"
+#property version   "2.30"
 #property description "Hull Moving Average trend filter."
 #property description "Colour-coded slope, reversal arrows and configurable alerts."
-#property description "Whipsaw control: volatility-scaled slope threshold + N-bar confirmation."
+#property description "Whipsaw control: volatility-scaled slope threshold + N-bar"
+#property description "confirmation inside a bounded confirmation window."
 
 //--- show indicator in the main chart window
 #property indicator_chart_window
-#property indicator_buffers 7
+#property indicator_buffers 8
 #property indicator_plots   3
 
 //--- plot 1: Hull Trend line
@@ -54,27 +55,37 @@ enum ENUM_SLOPE_FILTER
   };
 
 //--- Input Parameters
+//---
+//--- WARNING: iCustom arguments are POSITIONAL and `input group` occupies a
+//--- slot of its own (verified against this build's Experts log). Adding,
+//--- removing or reordering ANYTHING below - groups included - changes the
+//--- argument list every iCustom caller must pass. HullTrendEA_Core.mqh
+//--- mirrors this list in CreateHullHandle() and asserts the count at OnInit.
+//--- Current count: 24 (20 inputs + 4 groups).
 input group                             "Hull Moving Average"
-input int                InpHMAPeriod   = 20;             // Hull period
-input ENUM_APPLIED_PRICE InpHMAPrice    = PRICE_CLOSE;    // Applied price
+input int                InpHMAPeriod     = 20;             // Hull period
+input ENUM_APPLIED_PRICE InpHMAPrice      = PRICE_CLOSE;    // Applied price
 input group                             "Whipsaw filter"
-input ENUM_SLOPE_FILTER  InpSlopeFilter = SLOPE_FILTER_ATR; // Slope threshold mode
-input double             InpSlopeATRMul = 0.05;           // ATR mode: slope must exceed ATR x this
-input int                InpATRPeriod   = 14;             // ATR mode: ATR period
-input double             InpSlopePoints = 0.0;            // Points mode: minimum slope (points)
-input int                InpConfirmBars = 1;              // Counter-trend bars needed to flip (1 = none)
+input ENUM_SLOPE_FILTER  InpSlopeFilter   = SLOPE_FILTER_ATR; // Slope threshold mode
+input double             InpSlopeATRMul   = 0.05;           // ATR mode: slope must exceed ATR x this
+input int                InpATRPeriod     = 14;             // ATR mode: ATR period
+input double             InpSlopePoints   = 0.0;            // Points mode: minimum slope (points)
+input int                InpConfirmBars   = 1;              // Counter-trend bars needed to flip (1 = none)
+input int                InpConfirmWindow = 0;              // Bars a pending flip stays alive (0 = 3x confirm bars)
 input group                             "Reversal arrows"
-input bool               InpShowArrows  = true;           // Show reversal arrows
-input int                InpArrowUp     = 233;            // Up arrow code (Wingdings)
-input int                InpArrowDown   = 234;            // Down arrow code (Wingdings)
-input int                InpArrowOffset = 10;             // Arrow distance from bar (points)
+input bool               InpShowArrows    = true;           // Show reversal arrows
+input int                InpArrowUp       = 233;            // Up arrow code (Wingdings)
+input int                InpArrowDown     = 234;            // Down arrow code (Wingdings)
+input int                InpArrowOffset   = 10;             // Arrow distance from bar (points, acts as a floor)
+input double             InpArrowOffATR   = 0.25;           // Arrow distance from bar (x ATR, 0 = points only)
 input group                             "Alerts"
-input ENUM_SIGNAL_BAR    InpSignalBar   = SIGNAL_CLOSED_BAR; // Signal bar
-input bool               InpEnableAlert = true;           // Enable pop-up alerts
-input bool               InpEnableSound = false;          // Enable sound alerts
-input string             InpSoundFile   = "alert.wav";    // Sound file
-input bool               InpEnablePush  = false;          // Enable mobile push notifications
-input bool               InpEnableEmail = false;          // Enable email alerts
+input ENUM_SIGNAL_BAR    InpSignalBar     = SIGNAL_CLOSED_BAR; // Signal bar
+input bool               InpEnableAlert   = true;           // Enable pop-up alerts
+input bool               InpEnableSound   = false;          // Enable sound alerts
+input string             InpSoundFile     = "alert.wav";    // Sound file
+input bool               InpEnablePush    = false;          // Enable mobile push notifications
+input bool               InpEnableEmail   = false;          // Enable email alerts
+input bool               InpAlertOnAttach = false;          // Also alert if the attach bar already carries a reversal
 
 //--- Indicator Buffers
 double HMABuffer[];        // plot 0 - the Hull line
@@ -83,14 +94,17 @@ double UpArrowBuffer[];    // plot 1
 double DownArrowBuffer[];  // plot 2
 double PriceBuffer[];      // calculations - selected applied price
 double DiffBuffer[];       // calculations - 2*LWMA(half) - LWMA(full)
-double StreakBuffer[];     // calculations - consecutive counter-trend bars so far
+double StreakBuffer[];     // calculations - counter-trend bars banked so far
+double AgeBuffer[];        // calculations - bars since that streak opened
 
 //--- Derived settings (validated copies of the inputs)
-int    g_period    = 20;   // Hull period, clamped to a usable value
-int    g_half      = 10;   // period / 2
-int    g_sqrt      = 4;    // floor(sqrt(period))
-int    g_diffFirst = 19;   // first index with a valid DiffBuffer value
-int    g_hmaFirst  = 22;   // first index with a valid HMABuffer value
+int    g_period     = 20;  // Hull period, clamped to a usable value
+int    g_half       = 10;  // period / 2
+int    g_sqrt       = 4;   // floor(sqrt(period))
+int    g_diffFirst  = 19;  // first index with a valid DiffBuffer value
+int    g_hmaFirst   = 22;  // first index with a valid HMABuffer value
+int    g_seedBar    = 23;  // first index with a real slope - seeds the state machine
+int    g_colorFirst = 24;  // first index whose colour the state machine decides
 
 //--- Pre-computed LWMA weight sums: period*(period+1)/2
 double g_wHalf     = 0.0;
@@ -98,9 +112,12 @@ double g_wFull     = 0.0;
 double g_wSqrt     = 0.0;
 
 //--- Whipsaw filter state
-int    g_confirmBars = 1;               // counter-trend bars required, always >= 1
-int    g_atrHandle   = INVALID_HANDLE;  // only created for SLOPE_FILTER_ATR
-double g_slopePoints = 0.0;             // pre-multiplied fixed threshold, in price units
+int    g_confirmBars   = 1;               // counter-trend bars required, always >= 1
+int    g_confirmWindow = 3;               // bars a partial confirmation survives
+int    g_atrHandle     = INVALID_HANDLE;  // ATR: slope threshold and/or arrow offset
+bool   g_useAtrSlope   = false;           // ATR actually drives the slope threshold
+double g_slopePoints   = 0.0;             // pre-multiplied fixed threshold, in price units
+bool   g_atrShortWarn  = false;           // "ATR did not cover the history" said once
 
 //--- Alert state
 datetime g_lastSignalTime = 0;
@@ -126,9 +143,13 @@ int OnInit()
    if(g_sqrt < 1)
       g_sqrt = 1;
 
-//--- LWMA(full) needs g_period bars, the smoothing LWMA needs g_sqrt more
-   g_diffFirst = g_period - 1;
-   g_hmaFirst  = g_diffFirst + g_sqrt - 1;
+//--- LWMA(full) needs g_period bars, the smoothing LWMA needs g_sqrt more.
+//--- The state machine then needs one bar to seed a direction from a REAL
+//--- slope, and only decides colours from the bar after that.
+   g_diffFirst  = g_period - 1;
+   g_hmaFirst   = g_diffFirst + g_sqrt - 1;
+   g_seedBar    = g_hmaFirst + 1;
+   g_colorFirst = g_hmaFirst + 2;
 
    g_wHalf = 0.5 * g_half   * (g_half   + 1);
    g_wFull = 0.5 * g_period * (g_period + 1);
@@ -139,6 +160,17 @@ int OnInit()
    if(g_confirmBars < 1)
       g_confirmBars = 1;
 
+//--- A partial confirmation must not live forever. Flat bars HOLD the streak
+//--- (see OnCalculate) because on low timeframes most bars sit inside the
+//--- threshold band and resetting there made InpConfirmBars > 1 impossible to
+//--- satisfy - but without a window, two counter-trend bars a day apart still
+//--- flipped the trend, which is not what "N bars of confirmation" means.
+   g_confirmWindow = InpConfirmWindow;
+   if(g_confirmWindow <= 0)
+      g_confirmWindow = 3 * g_confirmBars;
+   if(g_confirmWindow < g_confirmBars)
+      g_confirmWindow = g_confirmBars;
+
    g_slopePoints = MathMax(0.0, InpSlopePoints) * _Point;
 
 //--- a zero threshold turns the whipsaw filter off without any visible sign,
@@ -148,8 +180,13 @@ int OnInit()
    if(InpSlopeFilter == SLOPE_FILTER_ATR && InpSlopeATRMul <= 0.0)
       Print("Hull Trend: ATR mode with a zero multiplier - whipsaw filter is OFF.");
 
-   g_atrHandle = INVALID_HANDLE;
-   if(InpSlopeFilter == SLOPE_FILTER_ATR && InpSlopeATRMul > 0.0)
+//--- ATR backs two independent features: the adaptive slope threshold and the
+//--- volatility-scaled arrow offset. Either one is reason enough to build it.
+   g_useAtrSlope  = (InpSlopeFilter == SLOPE_FILTER_ATR && InpSlopeATRMul > 0.0);
+   g_atrShortWarn = false;
+   g_atrHandle    = INVALID_HANDLE;
+
+   if(g_useAtrSlope || InpArrowOffATR > 0.0)
      {
       int atrPeriod = (InpATRPeriod < 1) ? 1 : InpATRPeriod;
       g_atrHandle = iATR(_Symbol, _Period, atrPeriod);
@@ -157,6 +194,7 @@ int OnInit()
         {
          //--- degrade to an unfiltered line rather than showing nothing at all
          Print("Hull Trend: could not create the ATR handle, slope filter disabled.");
+         g_useAtrSlope = false;
         }
      }
 
@@ -165,9 +203,10 @@ int OnInit()
 //--- occupies a positional slot, so a caller that does not pass a placeholder
 //--- for each group mis-assigns every parameter after the first one - silently.
    PrintFormat("Hull Trend config: period=%d price=%s filter=%s atrMul=%.3f "
-               "atrPeriod=%d slopePts=%.1f confirm=%d",
+               "atrPeriod=%d slopePts=%.1f confirm=%d window=%d arrowATR=%.2f",
                g_period, EnumToString(InpHMAPrice), EnumToString(InpSlopeFilter),
-               InpSlopeATRMul, InpATRPeriod, InpSlopePoints, g_confirmBars);
+               InpSlopeATRMul, InpATRPeriod, InpSlopePoints, g_confirmBars,
+               g_confirmWindow, InpArrowOffATR);
 
 //--- indicator buffers mapping
    SetIndexBuffer(0, HMABuffer,       INDICATOR_DATA);
@@ -177,6 +216,7 @@ int OnInit()
    SetIndexBuffer(4, PriceBuffer,     INDICATOR_CALCULATIONS);
    SetIndexBuffer(5, DiffBuffer,      INDICATOR_CALCULATIONS);
    SetIndexBuffer(6, StreakBuffer,    INDICATOR_CALCULATIONS);
+   SetIndexBuffer(7, AgeBuffer,       INDICATOR_CALCULATIONS);
 
 //--- all buffers stay in natural order (index 0 = oldest bar)
    ArraySetAsSeries(HMABuffer,       false);
@@ -186,14 +226,15 @@ int OnInit()
    ArraySetAsSeries(PriceBuffer,     false);
    ArraySetAsSeries(DiffBuffer,      false);
    ArraySetAsSeries(StreakBuffer,    false);
+   ArraySetAsSeries(AgeBuffer,       false);
 
 //--- nothing is drawn before enough history exists
    for(int plot = 0; plot < 3; plot++)
       PlotIndexSetDouble(plot, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    PlotIndexSetInteger(0, PLOT_DRAW_BEGIN, g_hmaFirst);
-   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, g_hmaFirst + 1);
-   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, g_hmaFirst + 1);
+   PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, g_colorFirst);
+   PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, g_colorFirst);
 
 //--- arrow appearance
    PlotIndexSetInteger(1, PLOT_ARROW, InpArrowUp);
@@ -239,8 +280,8 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
   {
-//--- not enough history to produce a slope yet
-   if(rates_total <= g_hmaFirst + 1)
+//--- not enough history to seed a direction AND decide a colour from it
+   if(rates_total <= g_colorFirst)
       return(0);
 
 //--- the direction of the supplied arrays is not guaranteed, so pin it down
@@ -258,35 +299,48 @@ int OnCalculate(const int rates_total,
       start = rates_total - 1;
 
 //--- first bar whose colour is decided by comparing against an earlier bar
-   int colorFrom = (start > g_hmaFirst + 1) ? start : g_hmaFirst + 1;
+   int colorFrom = (start > g_colorFirst) ? start : g_colorFirst;
 
-//--- ATR values backing the adaptive slope threshold, fetched BEFORE the Hull
-//--- line is rolled forward: if ATR is not ready the pass has to be repeated,
-//--- and building the averages over the whole history first is wasted work.
+//--- ATR values backing the adaptive slope threshold and the arrow offset,
+//--- fetched BEFORE the Hull line is rolled forward: if ATR is not ready the
+//--- pass has to be repeated, and building the averages over the whole history
+//--- first is wasted work.
    double atrVals[];
    int    atrFirst = rates_total;   // first bar index covered by atrVals
    if(g_atrHandle != INVALID_HANDLE)
      {
       ArraySetAsSeries(atrVals, false);
-      int copied = CopyBuffer(g_atrHandle, 0, 0, rates_total - colorFrom, atrVals);
+      const int want   = rates_total - colorFrom;
+      const int copied = CopyBuffer(g_atrHandle, 0, 0, want, atrVals);
       if(copied <= 0)
          return(prev_calculated);   // not ready: retry next tick, keep what we have
-      //--- a short copy is survivable: those early bars simply run unfiltered
+
+      //--- A short copy is survivable - those early bars simply run with a zero
+      //--- threshold - but it is NOT invisible: over that stretch the indicator
+      //--- is effectively SLOPE_FILTER_NONE, which is a different indicator.
+      //--- Say so once rather than let a backtest straddle two behaviours.
+      if(copied < want && !g_atrShortWarn)
+        {
+         g_atrShortWarn = true;
+         PrintFormat("Hull Trend: ATR covered only %d of %d bars - the oldest %d bar(s) run "
+                     "with NO slope threshold. Load more history for a clean backtest.",
+                     copied, want, want - copied);
+        }
       atrFirst = rates_total - copied;
      }
 
-//--- clear the warm-up region once. The bound is INCLUSIVE: bar g_hmaFirst is
-//--- only the state-machine seed, so the colour loop starts one bar later and
-//--- used to leave that bar's arrow buffers holding 0.0 - invisible on the
-//--- chart thanks to PLOT_DRAW_BEGIN, but CopyBuffer hands it to an EA as a
-//--- signal at price zero.
+//--- clear the warm-up region once. The bound is INCLUSIVE of the seed bar:
+//--- bars up to g_seedBar are state-machine scaffolding, and leaving their
+//--- arrow buffers holding 0.0 is invisible on the chart thanks to
+//--- PLOT_DRAW_BEGIN but hands an EA a signal at price zero via CopyBuffer.
    if(firstPass)
-      for(int i = 0; i <= g_hmaFirst && i < rates_total; i++)
+      for(int i = 0; i <= g_seedBar && i < rates_total; i++)
         {
          DiffBuffer[i]      = 0.0;
          HMABuffer[i]       = EMPTY_VALUE;
          ColorBuffer[i]     = COLOR_UP;
          StreakBuffer[i]    = 0.0;
+         AgeBuffer[i]       = 0.0;
          UpArrowBuffer[i]   = EMPTY_VALUE;
          DownArrowBuffer[i] = EMPTY_VALUE;
         }
@@ -351,28 +405,49 @@ int OnCalculate(const int rates_total,
      }
 
 //--- 4. slope colour and reversal arrows
-   double offset = InpArrowOffset * _Point;
-
-   if(colorFrom == g_hmaFirst + 1)
+//---
+//--- The seed used to be a hard-coded COLOR_UP on the first bar carrying a Hull
+//--- value. That is a direction the data never argued for, so if the next bar
+//--- sloped down the state machine emitted a DOWN "reversal" against a prior
+//--- that did not exist - a fabricated flip an EA reading the colour buffer
+//--- would happily trade. The seed now comes from the first REAL slope, and
+//--- the state machine only starts deciding on the bar after it.
+   if(colorFrom == g_colorFirst)
      {
-      //--- no earlier bar to compare against, so seed the state machine
-      ColorBuffer[g_hmaFirst]  = COLOR_UP;
-      StreakBuffer[g_hmaFirst] = 0.0;
+      const double seedSlope = HMABuffer[g_seedBar] - HMABuffer[g_hmaFirst];
+      const int    seedTrend = (seedSlope < 0.0) ? COLOR_DOWN : COLOR_UP;
+
+      ColorBuffer[g_hmaFirst]     = seedTrend;
+      ColorBuffer[g_seedBar]      = seedTrend;
+      StreakBuffer[g_hmaFirst]    = 0.0;
+      StreakBuffer[g_seedBar]     = 0.0;
+      AgeBuffer[g_hmaFirst]       = 0.0;
+      AgeBuffer[g_seedBar]        = 0.0;
+      UpArrowBuffer[g_hmaFirst]   = EMPTY_VALUE;
+      UpArrowBuffer[g_seedBar]    = EMPTY_VALUE;
+      DownArrowBuffer[g_hmaFirst] = EMPTY_VALUE;
+      DownArrowBuffer[g_seedBar]  = EMPTY_VALUE;
      }
 
    for(int i = colorFrom; i < rates_total; i++)
      {
       int    prevTrend  = (int)ColorBuffer[i - 1];
       int    prevStreak = (int)StreakBuffer[i - 1];
+      int    prevAge    = (int)AgeBuffer[i - 1];
       double slope      = HMABuffer[i] - HMABuffer[i - 1];
+
+      //--- ATR for this bar, shared by the threshold and the arrow offset
+      double atrHere = 0.0;
+      if(g_atrHandle != INVALID_HANDLE && i >= atrFirst)
+         atrHere = atrVals[i - atrFirst];
 
       //--- minimum slope this bar must clear to count as directional
       double threshold = 0.0;
       if(InpSlopeFilter == SLOPE_FILTER_POINTS)
          threshold = g_slopePoints;
       else
-         if(g_atrHandle != INVALID_HANDLE && i >= atrFirst)
-            threshold = atrVals[i - atrFirst] * InpSlopeATRMul;
+         if(g_useAtrSlope)
+            threshold = atrHere * InpSlopeATRMul;
 
       //--- direction this bar argues for: up, down, or -1 for too flat to say
       int candidate = -1;
@@ -384,38 +459,61 @@ int OnCalculate(const int rates_total,
 
       int curTrend  = prevTrend;
       int curStreak = 0;
+      int curAge    = 0;
 
       if(candidate == -1)
         {
          //--- too flat to argue either way: hold the count instead of clearing
          //--- it. On low timeframes most bars sit inside the threshold band, so
          //--- resetting here made InpConfirmBars > 1 impossible to ever satisfy.
+         //--- The age keeps running, which is what stops the hold being forever.
          curStreak = prevStreak;
+         curAge    = (prevStreak > 0 ? prevAge + 1 : 0);
         }
       else
          if(candidate == prevTrend)
            {
             //--- moving with the trend: any pending reversal is dead
             curStreak = 0;
+            curAge    = 0;
            }
          else
            {
             //--- counter-trend bar: flip only once enough of them line up
             curStreak = prevStreak + 1;
+            curAge    = (prevStreak > 0 ? prevAge + 1 : 1);
             if(curStreak >= g_confirmBars)
               {
                curTrend  = candidate;
                curStreak = 0;
+               curAge    = 0;
               }
            }
 
+      //--- A partial confirmation that has gone stale is abandoned, so
+      //--- InpConfirmBars means "N counter-trend bars inside a window" rather
+      //--- than "N counter-trend bars, however far apart".
+      if(curStreak > 0 && curAge >= g_confirmWindow)
+        {
+         curStreak = 0;
+         curAge    = 0;
+        }
+
       ColorBuffer[i]     = curTrend;
       StreakBuffer[i]    = curStreak;
+      AgeBuffer[i]       = curAge;
       UpArrowBuffer[i]   = EMPTY_VALUE;
       DownArrowBuffer[i] = EMPTY_VALUE;
 
       if(curTrend != prevTrend)
         {
+         //--- Offset scaled to volatility, with the point setting as a floor.
+         //--- A flat 10 points is invisible on an index CFD and enormous on a
+         //--- JPY cross; ATR is the only unit that travels between symbols.
+         double offset = InpArrowOffset * _Point;
+         if(InpArrowOffATR > 0.0 && atrHere > 0.0)
+            offset = MathMax(offset, atrHere * InpArrowOffATR);
+
          if(curTrend == COLOR_UP)
             UpArrowBuffer[i] = low[i] - offset;
          else
@@ -426,18 +524,18 @@ int OnCalculate(const int rates_total,
 //--- 5. alert on a fresh reversal
    int idx = (InpSignalBar == SIGNAL_CLOSED_BAR) ? rates_total - 2 : rates_total - 1;
 
-   if(g_lastSignalTime == 0)
+   if(idx > g_seedBar)
      {
-      //--- first attach only: do not replay historical signals. Keying this on
-      //--- firstPass meant every history reload / reconnect pushed the marker
-      //--- forward to the current bar and swallowed a reversal landing on it.
-      g_lastSignalTime = time[idx];
-     }
-   else
-     {
+      //--- First attach does not replay history. Keying this on firstPass meant
+      //--- every history reload / reconnect pushed the marker forward to the
+      //--- current bar and swallowed a reversal landing on it.
+      const bool firstSeen = (g_lastSignalTime == 0);
+
       //--- strictly newer, so a signal fires once per bar and a history
       //--- reload cannot walk the marker backwards and re-alert
-      if(idx > g_hmaFirst && time[idx] > g_lastSignalTime)
+      const bool fresh = (!firstSeen && time[idx] > g_lastSignalTime);
+
+      if(fresh || (firstSeen && InpAlertOnAttach))
         {
          bool up   = (UpArrowBuffer[idx]   != EMPTY_VALUE);
          bool down = (DownArrowBuffer[idx] != EMPTY_VALUE);
@@ -448,6 +546,10 @@ int OnCalculate(const int rates_total,
             TriggerAlert(up ? "BULLISH reversal" : "BEARISH reversal", time[idx]);
            }
         }
+
+      //--- nothing fired on the attach bar: arm the marker so later bars can
+      if(g_lastSignalTime == 0)
+         g_lastSignalTime = time[idx];
      }
 
    return(rates_total);

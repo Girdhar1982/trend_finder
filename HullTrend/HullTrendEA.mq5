@@ -9,9 +9,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "1.30"
+#property version   "1.40"
 #property description "Hull Trend flip EA - generic profile, unchanged v1.20 defaults."
 #property description "Shared core with the crypto and forex builds."
+#property description "v1.40: armed signals, S/R veto and structural partials."
 
 #include "HullTrendEA_Core.mqh"
 //+------------------------------------------------------------------+
