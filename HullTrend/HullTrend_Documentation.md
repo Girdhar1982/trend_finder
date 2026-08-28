@@ -2,7 +2,7 @@
 
 **A Hull Moving Average trend-flip system: a whipsaw-filtered trend indicator and a stop-and-reverse Expert Advisor.**
 
-Version 2.20 (indicator) · 1.30 (EA) · Last updated 2026-08-27
+Version 2.30 (indicator) · 1.00 (S/R indicator) · 1.40 (EA) · Last updated 2026-08-28
 
 ---
 
@@ -79,6 +79,8 @@ Files belong in your terminal's data folder (**File → Open Data Folder** in MT
 | File | Destination |
 |---|---|
 | `HullTrend_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendSR_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendSR.mqh` | `MQL5\Include\` — **shared by the EA and the S/R indicator**, one copy only |
 | `HullTrendEA.mq5` | `MQL5\Experts\` |
 | `HullTrendEA_Forex.mq5` | `MQL5\Experts\` |
 | `HullTrendEA_Crypto.mq5` | `MQL5\Experts\` |
@@ -321,6 +323,11 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 ---
 
 ## 16. Version history
+
+### S/R indicator 1.00 (new)
+- `HullTrendSR_MT5.mq5` draws the support/resistance levels the EA trades against.
+- The engine moved to `HullTrendSR.mqh` (`MQL5\Include\`) and is **shared** with the EA, so the picture cannot drift from the trades. The higher-timeframe ladder moved with it, because both consumers must resolve the same HTF or they scan different data.
+- Deliberately a separate indicator: folding it into `HullTrend_MT5` would extend that indicator's positional `iCustom` list — the most fragile contract in the system — to publish data the EA does not want, since the EA computes its own levels in-process.
 
 ### Indicator 2.30
 - **Fixed:** the state machine no longer fabricates a flip at the warm-up boundary. The seed is taken from the first real slope instead of a hard-coded "up", and colouring starts one bar later (§5).

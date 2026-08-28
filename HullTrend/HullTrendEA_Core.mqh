@@ -118,6 +118,13 @@
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
 
+//--- The support/resistance engine and the higher-timeframe ladder live in a
+//--- shared include so HullTrendSR_MT5 can DRAW exactly what this EA TRADES.
+//--- Two copies of that maths would drift, and a chart that disagreed with the
+//--- EA is worse than no chart: you would tune the veto against levels that
+//--- never existed. Install it in MQL5\Include\.
+#include <HullTrendSR.mqh>
+
 //--- Number of arguments CreateHullHandle() must pass to iCustom: every input
 //--- HullTrend_MT5 declares PLUS one slot per `input group`. Asserted against
 //--- the live handle at OnInit, because getting it wrong is silent.
@@ -307,13 +314,7 @@ int      g_armBarsLeft  = 0;
 bool     g_armLogged    = false;  // a veto has been logged for the current bar
 
 //--- support / resistance
-struct SRLevel
-  {
-   double            price;
-   int               touches;
-   datetime          last;
-  };
-SRLevel g_sr[];
+SRLevel g_sr[];   // built by SRBuild() from HullTrendSR.mqh
 
 //--- data-not-ready watchdogs. A handle that never fills makes the EA look
 //--- like a strategy that simply never signals, with nothing in the log.
@@ -486,95 +487,6 @@ bool UsableValue(const double v)
   }
 
 //+------------------------------------------------------------------+
-//| Candidate higher timeframes.                                     |
-//|                                                                  |
-//| Deliberately a SUBSET of what MT5 offers. M2/M3/M6/M12, H2/H3/H6 |
-//| and friends are perfectly good CHART timeframes but poor regime  |
-//| filters, and excluding them is what lets the formula below       |
-//| reproduce the original hand-written ladder exactly while also    |
-//| covering the timeframes that ladder had no answer for.           |
-//+------------------------------------------------------------------+
-#define HTF_CANDIDATES 8
-
-ENUM_TIMEFRAMES HTFCandidate(const int i)
-  {
-   switch(i)
-     {
-      case 0:
-         return PERIOD_M5;
-      case 1:
-         return PERIOD_M15;
-      case 2:
-         return PERIOD_M30;
-      case 3:
-         return PERIOD_H1;
-      case 4:
-         return PERIOD_H4;
-      case 5:
-         return PERIOD_D1;
-      case 6:
-         return PERIOD_W1;
-      default:
-         return PERIOD_MN1;
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| Higher timeframe selection.                                      |
-//|                                                                  |
-//| Targets InpHTFMult x the chart timeframe and snaps to the        |
-//| nearest candidate above. The previous version was a lookup table |
-//| covering eight chart timeframes; every other one fell through to |
-//| a default that returned the chart TF itself, which made OnInit   |
-//| disable the filter. H2, H6, H8 and H12 are ordinary choices, so  |
-//| that gap disabled the single most important filter in the system |
-//| on one log line at startup.                                     |
-//|                                                                  |
-//| Resolves identically to the old table on all eight timeframes it |
-//| did handle: M1->M15, M5->H1, M15->H4, M30->H4, H1->D1, H4->D1,   |
-//| D1->W1. Nothing that already worked changes.                     |
-//+------------------------------------------------------------------+
-ENUM_TIMEFRAMES PickHTF()
-  {
-   if(!InpHTFAuto)
-      return (InpHTF == PERIOD_CURRENT ? (ENUM_TIMEFRAMES)_Period : InpHTF);
-
-   const double chart = (double)PeriodSeconds((ENUM_TIMEFRAMES)_Period);
-   if(chart <= 0.0)
-      return (ENUM_TIMEFRAMES)_Period;
-
-   const double mult   = (InpHTFMult < 2.0 ? 2.0 : InpHTFMult);
-   const double target = chart * mult;
-
-   ENUM_TIMEFRAMES best = (ENUM_TIMEFRAMES)_Period;
-   double          bestErr = 0.0;
-   bool            found   = false;
-
-   for(int i = 0; i < HTF_CANDIDATES; i++)
-     {
-      const ENUM_TIMEFRAMES tf = HTFCandidate(i);
-      const double secs = (double)PeriodSeconds(tf);
-      if(secs <= chart)
-         continue;                  // a "higher" timeframe has to be higher
-
-      //--- Error measured in LOG space, so being 2x under target and 2x over
-      //--- it count the same. A linear metric would bias every choice upward,
-      //--- because the candidates get further apart as they get larger.
-      const double err = MathAbs(MathLog(secs / target));
-      if(!found || err < bestErr - 1e-9)
-        {
-         found   = true;
-         best    = tf;
-         bestErr = err;
-        }
-     }
-
-   //--- Candidates ascend and the comparison above is strict, so an exact tie
-   //--- keeps the SMALLER timeframe - the more responsive of the two.
-   return (found ? best : (ENUM_TIMEFRAMES)_Period);
-  }
-
-//+------------------------------------------------------------------+
 //| Build an indicator handle.                                       |
 //|                                                                  |
 //| iCustom arguments are POSITIONAL, and `input group` occupies a    |
@@ -743,149 +655,55 @@ bool MarginOK(const ENUM_ORDER_TYPE type, const double lots, const double price,
   }
 
 //+------------------------------------------------------------------+
-//| Support and resistance                                           |
+//| Support and resistance - configuration only.                     |
 //|                                                                  |
-//| Levels are pivot fractals - a high with k lower highs on each     |
-//| side - clustered by ATR-scaled proximity, with a touch count as   |
-//| their strength. A pivot at shift i is only examined once the k    |
-//| bars to its RIGHT have closed, so a level never appears, moves or |
-//| disappears after the fact. Highs and lows go into ONE list: a     |
-//| broken resistance becomes support, and a price that is both a     |
-//| pivot high and a pivot low is a stronger level, not two weak ones.|
+//| The algorithm itself is in HullTrendSR.mqh, shared with the      |
+//| drawing indicator. All this does is turn inputs into an SRConfig |
+//| and hand it over, so the two consumers cannot diverge.           |
 //+------------------------------------------------------------------+
-void SRAdd(const double price, const datetime when, const double tol)
-  {
-   const int n = ArraySize(g_sr);
-   for(int i = 0; i < n; i++)
-      if(MathAbs(g_sr[i].price - price) <= tol)
-        {
-         //--- touch-weighted running mean, so the level sits where price
-         //--- actually turned rather than on whichever pivot arrived first
-         g_sr[i].price = (g_sr[i].price * g_sr[i].touches + price) / (g_sr[i].touches + 1);
-         g_sr[i].touches++;
-         if(when > g_sr[i].last)
-            g_sr[i].last = when;
-         return;
-        }
-
-   ArrayResize(g_sr, n + 1);
-   g_sr[n].price   = price;
-   g_sr[n].touches = 1;
-   g_sr[n].last    = when;
-  }
-
-void SRCollect(const ENUM_TIMEFRAMES tf, const int lookback, const double tol,
-               const datetime cutoff)
-  {
-   const int k = (InpSRFractal < 1 ? 1 : InpSRFractal);
-
-   MqlRates r[];
-   ArraySetAsSeries(r, true);
-   const int n = CopyRates(_Symbol, tf, 0, lookback, r);
-   if(n < 2 * k + 2)
-      return;
-
-   //--- shift 0 is still forming, and a pivot needs k CLOSED bars on its right,
-   //--- so the newest bar that can carry one is at shift k + 1
-   for(int i = k + 1; i < n - k; i++)
-     {
-      if(r[i].time < cutoff)
-         break;                       // series is newest-first: everything older follows
-
-      bool hi = true, lo = true;
-      for(int j = 1; j <= k; j++)
-        {
-         if(r[i].high <= r[i - j].high || r[i].high <= r[i + j].high)
-            hi = false;
-         if(r[i].low  >= r[i - j].low  || r[i].low  >= r[i + j].low)
-            lo = false;
-        }
-
-      if(hi)
-         SRAdd(r[i].high, r[i].time, tol);
-      if(lo)
-         SRAdd(r[i].low,  r[i].time, tol);
-     }
-  }
-
-void SRDraw()
-  {
-   ObjectsDeleteAll(0, "HullSR_");
-   if(!InpSRDraw)
-      return;
-
-   const int minT = (InpSRMinTouches < 1 ? 1 : InpSRMinTouches);
-   for(int i = 0; i < ArraySize(g_sr); i++)
-     {
-      if(g_sr[i].touches < minT)
-         continue;
-      const string nm = StringFormat("HullSR_%d", i);
-      if(!ObjectCreate(0, nm, OBJ_HLINE, 0, 0, g_sr[i].price))
-         continue;
-      ObjectSetInteger(0, nm, OBJPROP_COLOR, (g_sr[i].touches >= 3 ? clrOrange : clrDimGray));
-      ObjectSetInteger(0, nm, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, nm, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, nm, OBJPROP_BACK, true);
-      ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
-      ObjectSetString(0, nm, OBJPROP_TOOLTIP,
-                      StringFormat("S/R %s  touches %d", DoubleToString(g_sr[i].price, _Digits),
-                                   g_sr[i].touches));
-     }
-  }
-
-//--- Rebuilt once per closed bar. O(lookback) with a tiny constant, which is
-//--- nothing next to the CopyBuffer calls already happening on the same bar.
 void BuildSR(const double atr)
   {
-   ArrayResize(g_sr, 0);
-   if(!InpUseSR || atr <= 0.0)
+   if(!InpUseSR)
+     {
+      ArrayResize(g_sr, 0);
       return;
+     }
 
-   const double tol = MathMax(InpSRClusterATR * atr, Pt());
+   SRConfig cfg;
+   cfg.fractal    = InpSRFractal;
+   cfg.lookback   = InpSRLookback;
+   cfg.useHTF     = InpSRUseHTF;
+   cfg.htf        = g_htf;
+   cfg.clusterATR = InpSRClusterATR;
+   cfg.maxAgeBars = (InpSRMaxAgeBars > 0 ? InpSRMaxAgeBars
+                     : 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20));
 
-   int maxAge = InpSRMaxAgeBars;
-   if(maxAge <= 0)
-      maxAge = 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20);
-
-   //--- one wall-clock horizon for both timeframes, expressed in chart bars
-   const long    span   = (long)maxAge * PeriodSeconds((ENUM_TIMEFRAMES)_Period);
-   const datetime cutoff = (datetime)MathMax(0.0, (double)TimeCurrent() - (double)span);
-
-   SRCollect((ENUM_TIMEFRAMES)_Period, (InpSRLookback < 50 ? 50 : InpSRLookback), tol, cutoff);
-
-   if(InpSRUseHTF && g_htf != (ENUM_TIMEFRAMES)_Period)
-      SRCollect(g_htf, MathMax(60, InpSRLookback / 4), tol, cutoff);
+   SRBuild(g_sr, _Symbol, (ENUM_TIMEFRAMES)_Period, cfg, atr);
 
    if(InpSRDraw)
-      SRDraw();
+     {
+      SRStyle st;
+      st.resistance  = clrTomato;
+      st.support     = clrMediumSeaGreen;
+      st.maxEachSide = 4;
+      st.labels      = true;
+      st.rays        = true;
+      st.labelShift  = 3;
+      SRDraw(g_sr, 0, "HullSR_", InpSRMinTouches, iClose(_Symbol, _Period, 1), atr,
+             (ENUM_TIMEFRAMES)_Period, st);
+     }
   }
 
-//--- Nearest level strictly on the `dir` side of `from` (+1 above, -1 below).
-bool SRNearest(const double from, const int dir, double &lvl, int &touches)
+//--- nearest qualifying level on the `dir` side, using this EA's touch filter
+bool SRAhead(const double from, const int dir, double &lvl, int &touches)
   {
-   bool   found = false;
-   double bestD = 0.0;
-   const int minT = (InpSRMinTouches < 1 ? 1 : InpSRMinTouches);
-
-   lvl      = 0.0;
-   touches  = 0;
-
-   for(int i = 0; i < ArraySize(g_sr); i++)
+   if(!InpUseSR)
      {
-      if(g_sr[i].touches < minT)
-         continue;
-      const double d = (g_sr[i].price - from) * dir;
-      if(d <= 0.0)
-         continue;                    // wrong side, or exactly on it
-      if(!found || d < bestD)
-        {
-         found   = true;
-         bestD   = d;
-         lvl     = g_sr[i].price;
-         touches = g_sr[i].touches;
-        }
+      lvl     = 0.0;
+      touches = 0;
+      return false;
      }
-   return found;
+   return SRNearest(g_sr, InpSRMinTouches, from, dir, lvl, touches);
   }
 
 //+------------------------------------------------------------------+
@@ -1128,7 +946,7 @@ double StopLevel(const HullSignal &sig, const double fill)
         {
          double lvl = 0.0;
          int    t   = 0;
-         if(SRNearest(fill, -sig.dir, lvl, t) &&
+         if(SRAhead(fill, -sig.dir, lvl, t) &&
             MathAbs(fill - lvl) <= 3.0 * sig.atr)
             return lvl - sig.dir * InpSLpadATR * sig.atr;
         }
@@ -1461,7 +1279,7 @@ ENUM_VETO TryEnter(const HullSignal &sig, const int htfDir, const bool verbose)
    //--- for a truncated move; that is a losing bet whatever the trend says.
    double srLevel = 0.0;
    int    srTouch = 0;
-   const bool srAhead = (InpUseSR && SRNearest(fill, sig.dir, srLevel, srTouch));
+   const bool srAhead = SRAhead(fill, sig.dir, srLevel, srTouch);
    const double srRoom = (srAhead ? MathAbs(srLevel - fill) : 0.0);
 
    if(srAhead && InpSRVetoATR > 0.0 && sig.atr > 0.0 && srRoom < InpSRVetoATR * sig.atr)
@@ -1924,7 +1742,7 @@ int OnInit()
      }
    CheckHullHandle(g_hHull, "trading-TF");
 
-   g_htf = PickHTF();
+   g_htf = SRPickHTF((ENUM_TIMEFRAMES)_Period, InpHTFAuto, InpHTF, InpHTFMult);
    if(InpUseHTF && g_htf != (ENUM_TIMEFRAMES)_Period)
      {
       g_hHullHTF = CreateHullHandle(g_htf);
@@ -2068,7 +1886,7 @@ void OnDeinit(const int reason)
   {
    PrintSummary("final");
 
-   ObjectsDeleteAll(0, "HullSR_");
+   SRClear(0, "HullSR_");
 
    if(g_hHull    != INVALID_HANDLE)
       IndicatorRelease(g_hHull);
@@ -2153,7 +1971,7 @@ void OnTick()
      {
       double roomLvl = 0.0;
       int    roomT   = 0;
-      if(SRNearest(sig.entry, sig.dir, roomLvl, roomT))
+      if(SRAhead(sig.entry, sig.dir, roomLvl, roomT))
         {
          g_srRoomSum += MathAbs(roomLvl - sig.entry) / sig.atr;
          g_srRoomN++;

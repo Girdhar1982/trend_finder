@@ -2,7 +2,7 @@
 
 **Companion guide to `HullTrend_Documentation.md`. This file covers the EA half in full: the profiles, the shared core, every input, and every runtime behaviour.**
 
-Version 1.30 · Last updated 2026-08-27
+Version 1.40 · Last updated 2026-08-28
 
 ---
 
@@ -69,12 +69,16 @@ Rationale baked into the crypto profile: crypto ranges are wider (flip less — 
 | File | Destination | Purpose |
 |---|---|---|
 | `HullTrend_MT5.mq5` | `MQL5\Indicators\` | The model (signal logic) |
+| `HullTrendSR_MT5.mq5` | `MQL5\Indicators\` | Draws the S/R levels (§23) — optional, not required to trade |
+| `HullTrendSR.mqh` | `MQL5\Include\` | **Shared** S/R engine + HTF ladder. One copy, used by the EA *and* the S/R indicator |
 | `HullTrendEA.mq5` | `MQL5\Experts\` | Execution — generic profile |
 | `HullTrendEA_Forex.mq5` | `MQL5\Experts\` | Execution — forex profile |
 | `HullTrendEA_Crypto.mq5` | `MQL5\Experts\` | Execution — crypto profile |
 | `HullTrendEA_Core.mqh` | `MQL5\Experts\` | Execution — all shared logic |
 
-`HullTrendEA_Core.mqh` carries a large maintainer header — read it before modifying anything.
+`HullTrendEA_Core.mqh` and `HullTrendSR.mqh` both carry large maintainer headers — read them before modifying anything.
+
+> `HullTrendSR.mqh` goes in `MQL5\Include\`, **not** next to the EA. It is included with angle brackets (`#include <HullTrendSR.mqh>`) by files that live in two different folders, and keeping a second copy would reintroduce exactly the drift it exists to prevent.
 
 ---
 
@@ -532,6 +536,7 @@ See §23 for what these do and how to tune them.
 
 - **Support and resistance** (§23): clustered pivot fractals used to veto entries with no room, take a structural partial, and place the swing stop. Never to generate an entry.
 - **Armed signals** (§7), `InpSignalArmBars`.
+- **Added:** `HullTrendSR_MT5` — a companion indicator that draws the levels. The engine moved to the shared `HullTrendSR.mqh` (with the HTF ladder) so the EA and the drawing cannot diverge.
 - Friday cut-off and daily-loss halt can now **close** open positions (`InpFlattenOnFriday`, `InpFlattenOnLoss`, both default `true`).
 - `HULL_ICUSTOM_ARGS` is cross-checked against the live handle via `IndicatorParameters()` at `OnInit`, and the observed count is printed in `ENV`. A mismatch is a loud error, not a refusal to start (§4).
 - `SUM` reports arm statistics, S/R level count, average room ahead, and warns when the S/R veto is rejecting more than it admits.
@@ -580,9 +585,24 @@ Three uses, in descending order of expected value:
 different edge, a different stop and a different cost profile; mixing it in would make both
 untestable.
 
+### Seeing them on the chart
+
+Attach **`HullTrendSR_MT5`** to the same chart. It shares the EA's engine (`HullTrendSR.mqh` in `MQL5\Include\`) rather than reimplementing it, so with matching inputs it draws exactly the levels the EA is trading against.
+
+| Reading it | |
+|---|---|
+| Line start | The pivot that created the level — you can see where it came from, not just that it exists |
+| Colour | Red above the current price (resistance), green below (support). Levels switch side as price crosses them |
+| Width / style | Dotted and thin = 2 touches; solid = 3+; thickest = 6+ |
+| Label | `price ×touches`, plus `(0.82×ATR)` on the **nearest level each side** — that is the exact quantity `InpSRVetoATR` is compared against |
+
+**Match these inputs to the EA or the picture is fiction:** `InpFractal`, `InpLookback`, `InpClusterATR`, `InpMinTouches`, `InpMaxAgeBars`, `InpATRPeriod`, and the whole higher-timeframe group. Both programs print their resolved configuration at `OnInit` (`Hull Trend S/R config: …` and the EA's `ENV | S/R …` line) — read them side by side once.
+
+The EA's own `InpSRDraw` draws the same levels from inside the EA, under a different object prefix, which is useful in a visual-mode backtest. On a live chart prefer the indicator: it works without the EA running, and it refreshes its colours and distance labels every `InpRedrawSecs` seconds rather than once per bar.
+
 ### How the levels are built
 
-Rebuilt once per closed bar, in `BuildSR()`:
+Rebuilt once per closed bar, in `SRBuild()` (`HullTrendSR.mqh`), which both the EA and the indicator call:
 
 1. **Pivot fractals.** A pivot high is a bar whose high exceeds the `InpSRFractal` highs on
    each side; a pivot low is the mirror. Scanned on the trading timeframe and, when
@@ -624,8 +644,9 @@ Recommended procedure, one change at a time against the same backtest:
 2. Set `InpSRVetoATR` to roughly half the observed average. Re-run and compare entries, win
    rate **and** total R — not total R alone.
 3. Only then touch `InpSRTargetPart`, and only then `InpSRStop`.
-4. Set `InpSRDraw = true` once, in visual mode, to confirm the levels land where you would
-   have drawn them by hand. Then turn it off.
+4. Attach `HullTrendSR_MT5` and confirm the levels land where you would have drawn them
+   by hand. Read the `(x.xx×ATR)` label on the nearest level each side: that is the
+   number `InpSRVetoATR` has to sit below.
 
 ### The cheaper experiment to run first
 
