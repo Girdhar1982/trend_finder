@@ -237,11 +237,18 @@ void SRAddLevel(SRLevel &lv[], const double price, const datetime when, const do
   }
 
 //+------------------------------------------------------------------+
-//| Scan one timeframe for pivot fractals                            |
+//| Scan one timeframe for pivot fractals.                           |
+//|                                                                  |
+//| `maxBars` is the horizon as a bar count ON THIS TIMEFRAME - see  |
+//| SRBuild, which converts one shared horizon into the right count  |
+//| for each timeframe it scans.                                     |
+//|                                                                  |
+//| Returns false ONLY when the history could not be read, which a   |
+//| caller must not confuse with "no pivots found".                  |
 //+------------------------------------------------------------------+
-void SRCollect(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES tf,
+bool SRCollect(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES tf,
                const int lookback, const int fractalIn, const double tol,
-               const datetime cutoff)
+               const int maxBars)
   {
    const int k = (fractalIn < 1 ? 1 : fractalIn);
 
@@ -249,14 +256,18 @@ void SRCollect(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES tf,
    ArraySetAsSeries(r, true);
    const int n = CopyRates(symbol, tf, 0, lookback, r);
    if(n < 2 * k + 2)
-      return;
+      return(false);
 
    //--- Shift 0 is still forming, and a pivot needs k CLOSED bars on its right,
    //--- so the newest bar that can carry one is at shift k + 1. This is what
    //--- makes the level set non-repainting.
    for(int i = k + 1; i < n - k; i++)
      {
-      if(r[i].time < cutoff)
+      //--- `i` IS the bar shift, so the horizon is exact here. Expressing it in
+      //--- calendar seconds cut the window short by every weekend and session
+      //--- break that fell inside it - 200 bars of H1 forex reached back about
+      //--- 140.
+      if(i > maxBars)
          break;                     // series is newest-first: everything older follows
 
       bool hi = true, lo = true;
@@ -273,35 +284,62 @@ void SRCollect(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES tf,
       if(lo)
          SRAddLevel(lv, r[i].low,  r[i].time, tol);
      }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| The same horizon on a different timeframe: `bars` of `from`      |
+//| re-expressed as a bar count on `to`. Rounded UP, so re-quoting a |
+//| horizon can never quietly shorten it.                            |
+//+------------------------------------------------------------------+
+int SRBarsOnTF(const int bars, const ENUM_TIMEFRAMES from, const ENUM_TIMEFRAMES to)
+  {
+   const long a = PeriodSeconds(from);
+   const long b = PeriodSeconds(to);
+   if(a <= 0 || b <= 0 || a == b)
+      return(bars);
+   return((int)MathMax(1.0, MathCeil((double)bars * (double)a / (double)b)));
   }
 
 //+------------------------------------------------------------------+
 //| Build the whole level set. O(lookback) with a tiny constant.      |
 //| `atr` sets the clustering scale; `maxAgeBars` must already be     |
 //| resolved to a positive number by the caller.                      |
+//|                                                                   |
+//| Returns false ONLY when the chart-timeframe history could not be  |
+//| read - not when the scan simply found nothing. A caller that      |
+//| treats the two alike will clear its levels on a terminal that is  |
+//| merely still syncing.                                             |
 //+------------------------------------------------------------------+
-void SRBuild(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES chartTF,
+bool SRBuild(SRLevel &lv[], const string symbol, const ENUM_TIMEFRAMES chartTF,
              const SRConfig &cfg, const double atr)
   {
    ArrayResize(lv, 0);
    if(atr <= 0.0)
-      return;
+      return(false);
 
    const double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    const double tol   = MathMax(cfg.clusterATR * atr, point);
 
    const int age = (cfg.maxAgeBars > 0 ? cfg.maxAgeBars : 400);
 
-   //--- one wall-clock horizon for both timeframes, expressed in chart bars
-   const long     span   = (long)age * PeriodSeconds(chartTF);
-   const datetime cutoff = (datetime)MathMax(0.0, (double)TimeCurrent() - (double)span);
+   //--- ONE horizon for both timeframes, counted in BARS rather than wall
+   //--- clock. `age` is quoted in CHART bars, so the HTF scan gets that same
+   //--- span re-expressed in ITS own bars: an H4 scan behind an H1 chart
+   //--- reaches a quarter as many bars, covering the same stretch of history
+   //--- rather than four times it.
+   const bool ok = SRCollect(lv, symbol, chartTF,
+                             (cfg.lookback < 50 ? 50 : cfg.lookback),
+                             cfg.fractal, tol, age);
 
-   SRCollect(lv, symbol, chartTF, (cfg.lookback < 50 ? 50 : cfg.lookback),
-             cfg.fractal, tol, cutoff);
-
+   //--- The HTF pass is a garnish on the chart-TF set; if its history is not
+   //--- there, the levels that are still stand.
    if(cfg.useHTF && cfg.htf != chartTF)
       SRCollect(lv, symbol, cfg.htf, MathMax(60, cfg.lookback / 4),
-                cfg.fractal, tol, cutoff);
+                cfg.fractal, tol, SRBarsOnTF(age, chartTF, cfg.htf));
+
+   return(ok);
   }
 
 //+------------------------------------------------------------------+

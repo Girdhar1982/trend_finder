@@ -678,6 +678,10 @@ void BuildSR(const double atr)
    cfg.maxAgeBars = (InpSRMaxAgeBars > 0 ? InpSRMaxAgeBars
                      : 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20));
 
+   //--- SRBuild reports false when the history could not be read. g_sr is
+   //--- empty either way, so the S/R vetoes simply do not fire on this bar and
+   //--- the next one rebuilds - there is nothing for the EA to do differently,
+   //--- but the distinction is deliberate rather than overlooked.
    SRBuild(g_sr, _Symbol, (ENUM_TIMEFRAMES)_Period, cfg, atr);
 
    if(InpSRDraw)

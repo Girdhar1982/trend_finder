@@ -21,7 +21,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "1.10"
+#property version   "1.20"
 #property description "Support / resistance levels from clustered pivot fractals."
 #property description "Labels rank them R1/S1 outwards and give the distance in ATR and pips."
 #property description "Shares the Hull Trend EA's engine - match the EA's group F inputs"
@@ -156,11 +156,10 @@ int OnCalculate(const int rates_total,
    //--- Rebuild once per closed bar. The pivot set cannot change intrabar by
    //--- construction, so doing this per tick would burn CPU to redraw the same
    //--- picture. The labels do move with price, so redraw when it is worth it.
-   const bool newBar = (time[rates_total - 1] != g_lastBar);
+   const datetime bar    = time[rates_total - 1];
+   const bool     newBar = (bar != g_lastBar);
    if(newBar)
      {
-      g_lastBar = time[rates_total - 1];
-
       SRConfig cfg;
       cfg.fractal    = InpFractal;
       cfg.lookback   = InpLookback;
@@ -170,7 +169,14 @@ int OnCalculate(const int rates_total,
       cfg.maxAgeBars = (InpMaxAgeBars > 0 ? InpMaxAgeBars
                         : 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20));
 
-      SRBuild(g_sr, _Symbol, (ENUM_TIMEFRAMES)_Period, cfg, atr[0]);
+      //--- Mark the bar done only once the history was readable. Marking it
+      //--- first meant a short CopyRates - routine while the terminal is still
+      //--- syncing after an attach - cleared every level and then left the
+      //--- chart bare until the NEXT bar closed. On H4 that is four hours.
+      if(!SRBuild(g_sr, _Symbol, (ENUM_TIMEFRAMES)_Period, cfg, atr[0]))
+         return(prev_calculated);
+
+      g_lastBar = bar;
      }
 
    //--- Which levels count as "nearest", which side of price they sit on, and

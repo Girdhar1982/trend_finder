@@ -433,7 +433,7 @@ See §23 for what these do and how to tune them.
 | `InpSRUseHTF` | `true` | Also scan the resolved higher timeframe |
 | `InpSRClusterATR` | `0.50` | Merge pivots closer than this × ATR into one level |
 | `InpSRMinTouches` | `2` | Ignore levels with fewer touches. `1` admits every single bar extreme and will flood the list |
-| `InpSRMaxAgeBars` | `0` | Drop levels older than N bars (`0` = `20 × InpHMAPeriod`) |
+| `InpSRMaxAgeBars` | `0` | Drop levels older than N **bars**, not seconds (`0` = `20 × InpHMAPeriod`) |
 | `InpSRVetoATR` | profile | Veto if the level ahead is nearer than this × ATR (`0` = off). **Check it against `avg room ahead` in the `SUM` line** |
 | `InpSRTargetPart` | `0.50` | Fraction of the position closed at the level ahead (`0` = off) |
 | `InpSRStop` | `true` | `SL_SWING` places the stop at an S/R level instead of the raw extreme |
@@ -631,7 +631,9 @@ Rebuilt once per closed bar, in `SRBuild()` (`HullTrendSR.mqh`), which both the 
 
 1. **Pivot fractals.** A pivot high is a bar whose high exceeds the `InpSRFractal` highs on
    each side; a pivot low is the mirror. Scanned on the trading timeframe and, when
-   `InpSRUseHTF`, on the resolved HTF over the same wall-clock window.
+   `InpSRUseHTF`, on the resolved HTF over the same stretch of history — `SRBarsOnTF()`
+   re-quotes the horizon into the HTF's own bar count, so the two scans cover the same
+   history rather than the HTF reaching several times further back.
 2. **Never repaints.** A pivot at shift `i` is only examined once the `k` bars to its right
    have closed, so the scan starts at shift `k + 1` (shift 0 is still forming). A level
    cannot appear, move or vanish after the fact — which is the whole reason to prefer
@@ -641,7 +643,12 @@ Rebuilt once per closed bar, in `SRBuild()` (`HullTrendSR.mqh`), which both the 
    count. Highs and lows go into **one** list: a broken resistance becomes support, and a
    price that is both a pivot high and a pivot low is one strong level, not two weak ones.
 4. **Aged out.** Anything older than `InpSRMaxAgeBars` (default `20 × InpHMAPeriod`) is
-   dropped.
+   dropped. Counted in **bars**, not calendar time — before S/R 1.20 the cutoff was
+   `N × PeriodSeconds` compared against bar times, so weekends and session breaks ate into
+   the window (a 200-bar horizon on EURUSD H1 reached about 120 bars). Levels now reach as
+   far back as this input really specifies, which generally means **more** of them: re-read
+   the `S/R levels` count in the `SUM` line before trusting an `InpSRVetoATR` tuned against
+   the old behaviour.
 5. **Filtered at query time.** `SRNearest()` ignores levels below `InpSRMinTouches`.
 
 ### Tuning it — read the numbers, do not guess

@@ -2,7 +2,7 @@
 
 **A Hull Moving Average trend-flip system: a whipsaw-filtered trend indicator and a stop-and-reverse Expert Advisor.**
 
-Version 2.30 (indicator) · 1.10 (S/R indicator) · 1.40 (EA) · Last updated 2026-08-29
+Version 2.30 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicator) · 1.40 (EA) · Last updated 2026-08-29
 
 ---
 
@@ -23,16 +23,20 @@ Version 2.30 (indicator) · 1.10 (S/R indicator) · 1.40 (EA) · Last updated 20
 13. [Troubleshooting](#13-troubleshooting)
 14. [Known limitations](#14-known-limitations)
 15. [Maintenance checklist](#15-maintenance-checklist)
-16. [Version history](#16-version-history)
+16. [Liquidity grabs](#16-liquidity-grabs)
+17. [Version history](#17-version-history)
 
 ---
 
 ## 1. What this is
 
-A two-part system built around the Hull Moving Average:
+A Hull Moving Average trend engine and its execution layer, plus two chart studies of the
+market structure around them:
 
 - **`HullTrend_MT5.mq5`** — an indicator that draws the Hull line colour-coded by slope, marks trend **reversals** with arrows, and fires alerts. Its distinguishing feature is **whipsaw control**: a minimum slope (optionally scaled by ATR) that must be exceeded before a bar is allowed to argue for a trend change, plus an N-bar confirmation before a flip is actually declared.
 - **`HullTrendEA*.mq5`** — a **stop-and-reverse** trend follower that trades the flips the indicator publishes. The natural exit is the opposite flip; the stop is a disaster brake, not a target.
+- **`HullTrendSR_MT5.mq5`** — draws the support/resistance levels the EA vetoes against, from the very engine the EA runs. Documented in `HullTrend_EA_Documentation.md` §23.
+- **`HullTrendLG_MT5.mq5`** — marks **liquidity grabs**: bars that pierce a recent swing and close back inside it. Standalone; no EA reads it. See §16.
 
 > **Cost warning (read this first).** A flip system pays the spread on *every* reversal. Round-trip cost as a fraction of ATR(14) is roughly **0.5–0.9× on M1 FX, 0.25–0.4× on M5 and 0.12–0.2× on M15**. M1 on retail FX does not clear its own costs. **M5 is the practical floor for majors**; M1 only makes sense where the spread is tiny relative to the range (index CFDs, futures).
 
@@ -54,7 +58,7 @@ A two-part system built around the Hull Moving Average:
 │                                                          │
 │  Outputs: 7 buffers, colour-coded line, arrows           │
 └────────────────────────┬─────────────────────────────────┘
-                         │ iCustom (21 args) + CopyBuffer
+                         │ iCustom (24 args) + CopyBuffer
                          ▼
 ┌──────────────────────────────────────────────────────────┐
 │  HullTrendEA*.mq5                (MQL5\Experts\)         │
@@ -65,6 +69,24 @@ A two-part system built around the Hull Moving Average:
 │     HullTrendEA.mq5        generic profile               │
 │     HullTrendEA_Forex.mq5  M5+, 1.5xATR stop, Fri cutoff │
 │     HullTrendEA_Crypto.mq5 H1+, 2.25xATR stop, 24/7      │
+└──────────────────────────────────────────────────────────┘
+```
+
+Two chart studies sit alongside, each sharing its engine rather than duplicating it:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  HullTrendSR_MT5.mq5             (MQL5\Indicators\)      │
+│  ─────────────────────────────────────────────────────   │
+│  Draws the S/R levels the EA vetoes against.             │
+│  Engine: HullTrendSR.mqh   <- SHARED WITH THE EA         │
+└──────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────┐
+│  HullTrendLG_MT5.mq5             (MQL5\Indicators\)      │
+│  ─────────────────────────────────────────────────────   │
+│  Marks liquidity grabs; lists them in the Experts tab.   │
+│  Engine: HullTrendLG.mqh   <- no EA consumer             │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -81,6 +103,8 @@ Files belong in your terminal's data folder (**File → Open Data Folder** in MT
 | `HullTrend_MT5.mq5` | `MQL5\Indicators\` |
 | `HullTrendSR_MT5.mq5` | `MQL5\Indicators\` |
 | `HullTrendSR.mqh` | `MQL5\Include\` — **shared by the EA and the S/R indicator**, one copy only |
+| `HullTrendLG_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendLG.mqh` | `MQL5\Include\` — the liquidity-grab engine |
 | `HullTrendEA.mq5` | `MQL5\Experts\` |
 | `HullTrendEA_Forex.mq5` | `MQL5\Experts\` |
 | `HullTrendEA_Crypto.mq5` | `MQL5\Experts\` |
@@ -297,6 +321,9 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 | EA never trades | Read the `SUM` line: the `vetoes:` histogram names the rejecting filter (e.g. `htf-disagrees=142 spread=8`). |
 | EA trades differ from chart arrows | The EA reads the colour buffer, not arrows, at shift 1 — check `InpHTFShift` and that you are not reading the forming bar. |
 | `sizing preflight: … rounds to ZERO lots` | Risk % is below the minimum-lot floor on this symbol. The log says the exact % needed. |
+| No liquidity-grab markers at all | `InpMinSweepATR` is too high for the symbol, or `InpMaxAgeBars` is shorter than the visible chart. Both effective values are on the `Hull Liquidity Grab config:` line printed at attach. |
+| Fewer grab markers than the log lists | `InpMaxPoints` caps what is **drawn** (default 8), never what is found. The `HullLG \| LIST` line reports the true totals. |
+| Grab markers all sit on one side | Expected in a one-way trend. The log does not: `InpPrintPerSide` caps each direction independently, so both sides always appear in the list. |
 
 ---
 
@@ -314,15 +341,141 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 
 | Change | Also update |
 |---|---|
-| A whipsaw default | The profile table in `HullTrend_EA_Documentation.md` §16 (the EA forwards `InpSlopeATRMul`) |
+| A whipsaw default | The profile table in `HullTrend_EA_Documentation.md` §18 (the EA forwards `InpSlopeATRMul`) |
 | Indicator input order | The **24**-argument `iCustom` call in `HullTrendEA_Core.mqh`'s `CreateHullHandle()` — group placeholders included — **and** `HULL_ICUSTOM_ARGS`, which the EA asserts against the live handle at `OnInit` |
 | Buffer order | The buffer contract in §9 **and** the EA's `ReadSignal()` buffer indices |
 | Anything in the state machine | The streak/flip explanation in §4–§5 and the EA's flip-detection (`col[1] != col[0]`) |
 | A new per-bar log line | The log format table in `HullTrend_EA_Documentation.md` §15 |
+| An `LGConfig` field | `LGViewerConfig()` in `HullTrendLG_MT5.mq5` — the one place inputs become a config, so the logged line and the scan cannot diverge |
+| How either engine ages its history out | §16.3 here **and** `HullTrend_EA_Documentation.md` §23 step 4 — both state that the horizon is counted in bars |
 
 ---
 
-## 16. Version history
+## 16. Liquidity grabs
+
+`HullTrendLG_MT5.mq5` marks **liquidity grabs** (stop hunts, sweeps): a bar that pierces a
+resting order cluster and closes back inside it. The liquidity was real; the breakout was not.
+
+- **Bull grab** — price takes out the sell stops resting under a recent swing **low**, then
+  closes back above it. The sell side is exhausted.
+- **Bear grab** — price takes out the buy stops above a recent swing **high**, then closes
+  back below it. The breakout failed.
+
+No EA reads this indicator. It is a chart study and a log, nothing more.
+
+### 16.1 How a grab is detected
+
+`LGCollect()` in `HullTrendLG.mqh`, run once per closed bar:
+
+1. **The reference is the swing *before* the bar.** For a bar at shift `i` the level is the
+   highest high / lowest low over shifts `i+1 … i+InpRefBars`. A bar can never sweep a level
+   that includes its own extreme.
+2. **Closed bars only.** The scan starts at shift 1, and the close must be back on the
+   original side of the level. Nothing repaints: a marker can appear one bar late, but once
+   drawn it never moves or vanishes.
+3. **The pierce must be worth something.** It must exceed `InpMinSweepATR × ATR`. A one-tick
+   overshoot of a level is noise, not a grab.
+4. **Both directions in one list**, tagged by direction, newest first.
+
+### 16.2 Input reference — liquidity grabs
+
+**Detection**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpLookback` | `200` | Bars scanned for grabs. Floored at 50 by the engine. |
+| `InpRefBars` | `20` | Bars before each bar that define the swept level. Floored at 2. |
+| `InpMinSweepATR` | `0.25` | Minimum pierce beyond the level, in ATR |
+| `InpMaxAgeBars` | `0` | Drop grabs older than N **bars** (`0` = use `InpLookback`) |
+| `InpATRPeriod` | `14` | ATR period for the sweep scale |
+
+**Experts log**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpPrint` | `true` | Print grabs to the Experts tab |
+| `InpPrintPerSide` | `3` | Recent grabs printed **per direction** (`0` = all) |
+
+**Appearance**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpColorBull` | `clrMediumSeaGreen` | Bull grab — a low was swept |
+| `InpColorBear` | `clrTomato` | Bear grab — a high was swept |
+| `InpLabels` | `true` | Text label beside each marker |
+| `InpFontSize` | `8` | Label font size (floored at 6) |
+| `InpMaxPoints` | `8` | Markers **drawn** (`0` = all). Does not affect what is found. |
+| `InpShowLevel` | `true` | Dotted segment at the swept level |
+
+The `Hull Liquidity Grab config:` line printed at attach reports the values the scan will
+**actually** use, with the engine's floors already applied — a `refBars` of 1 is logged as the
+2 it becomes. The line is a record of the run, not of the dialog.
+
+### 16.3 The age horizon is counted in bars
+
+`InpMaxAgeBars` means what it says: N **chart bars**, not N × the bar duration in seconds.
+The distinction is not pedantic. The market is shut all weekend, so N bars always span more
+than N hours of wall clock on an H1 chart. Measured on EURUSD H1 at a Monday open, a cutoff
+set 200 hours back reached only **120 bars** — the requested 200-bar window came up 40%
+short, with nothing in any log to say so.
+
+The S/R engine had exactly that defect and was corrected with it — see the S/R indicator 1.20
+entry in §17.
+
+### 16.4 Reading the log
+
+Printed at attach, and again only when a new grab confirms — never on every bar:
+
+```
+HullLG | LIST | 20 grab(s) in lookback: 12 bull, 8 bear - showing most recent 3 of each, newest first
+HullLG | GRAB | 2026.08.28 14:00 | BULL  price 1.16021  swept level 1.16044  sweep 0.31 ATR  6 bars ago
+```
+
+The two direction counts are what was **found**, so they add up to the total beside them;
+`showing most recent N of each` says how much of it follows. Because `InpPrintPerSide` caps
+each direction independently, a one-way trend cannot crowd the other side out of the list.
+
+### 16.5 Reading the chart
+
+The arrow sits **0.25 × ATR clear of the swept extreme** — below a swept low, above a swept
+high — so it points at the wick instead of covering it. That clearance is in ATR for the same
+reason the trend indicator's flip arrows are: a flat point offset is invisible on an index CFD
+and enormous on a JPY cross. A dotted segment marks the level that was swept, and the label
+reads `LG-B  0.31A` — `B` for a bull grab, `S` for a bear one, then the sweep in ATR. The
+tooltip carries the full detail.
+
+---
+
+## 17. Version history
+
+### Liquidity-grab indicator 1.00 (new)
+- `HullTrendLG_MT5.mq5` marks liquidity grabs on the chart and lists the recent ones in the
+  Experts tab (§16).
+- The detection lives in `HullTrendLG.mqh` (`MQL5\Include\`), apart from the indicator that
+  draws it, on the same principle as `HullTrendSR.mqh`: one copy of the rule, any number of
+  consumers. No EA reads it yet — the split exists so that adding one never means
+  reimplementing the detection.
+- Non-repainting by construction: a grab needs a closed bar and a close back inside the level.
+
+### S/R indicator 1.20
+- **Fixed:** `InpMaxAgeBars` is counted in **bars**, as its label always claimed. It was being
+  converted to `N × PeriodSeconds` and compared against bar times, so every weekend and
+  session break inside the window shortened it. Measured on EURUSD H1, a 200-bar horizon was
+  reaching 120 bars.
+- **Fixed:** that horizon is now re-quoted per timeframe instead of shared as one wall-clock
+  instant. `SRBarsOnTF()` converts the chart-bar horizon into the HTF's own bar count — a
+  150-bar H1 horizon becomes 38 H4 bars — rounding up so re-quoting can never shorten it.
+  Both scans still cover the same stretch of history; that invariant was the point of the old
+  shared cutoff and it is preserved.
+- **Fixed:** the indicator no longer blanks the chart for a whole bar when the history read
+  fails. `SRBuild()` and `SRCollect()` return `false` **only** when history is unreadable —
+  never to mean "found nothing" — and the viewer marks a bar done only after a successful
+  build. A short `CopyRates` while the terminal was still syncing used to clear every level
+  and leave the chart bare until the next bar closed; on H4 that is four hours.
+- **Affects the EA too.** The engine is shared, so the EA's levels move with it. They now
+  reach as far back as `InpSRMaxAgeBars` really specifies, which generally means *more*
+  levels than before. Re-read the `SUM | … | S/R levels` count before trusting an
+  `InpSRVetoATR` that was tuned against the old behaviour.
 
 ### S/R indicator 1.10
 - **Changed:** the on-chart numbers now answer the question being asked. A label used to read
