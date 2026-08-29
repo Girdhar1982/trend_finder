@@ -61,16 +61,63 @@ struct SRConfig
   };
 
 //+------------------------------------------------------------------+
+//| How much a level's label should say.                             |
+//|                                                                  |
+//| The chart already prints the price on its own axis, so a label   |
+//| whose first number is that same price spends the widest, most    |
+//| readable strip of the screen restating what the trader can       |
+//| already read. Every rung below spends it instead on the numbers  |
+//| the axis cannot give: how far away the level is, in the units    |
+//| the position is actually sized in.                               |
+//+------------------------------------------------------------------+
+enum ENUM_SR_LABEL
+  {
+   SR_LABEL_COMPACT = 0,   // Compact - rank and ATR distance only
+   SR_LABEL_NORMAL  = 1,   // Normal - plus pips and strength
+   SR_LABEL_FULL    = 2    // Full - plus price, touch count and age
+  };
+
+//+------------------------------------------------------------------+
 //| How to draw it                                                   |
+//|                                                                  |
+//| Defaulted in a constructor, so that adding a field here cannot   |
+//| silently feed garbage to a caller written before it existed.     |
+//| The EA fills the first six and must keep working untouched.      |
 //+------------------------------------------------------------------+
 struct SRStyle
   {
    color             resistance;   // levels above the current price
    color             support;      // levels below it
    int               maxEachSide;  // 0 = draw them all
-   bool              labels;       // price / touches / distance text
+   bool              labels;       // per-level text
    bool              rays;         // extend the line to the right edge
    int               labelShift;   // label offset to the right, in bars
+   int               detail;       // ENUM_SR_LABEL - how much that text says
+   int               fontSize;     // label and panel font size
+   bool              panel;        // the summary block in the chart corner
+   int               panelCorner;  // ENUM_BASE_CORNER it hangs from
+   int               panelX;       // its inset from that corner, in pixels
+   int               panelY;       //
+   color             panelText;    // its body colour
+   color             panelBg;      // its backing plate (clrNONE = no plate)
+
+                     SRStyle()
+     {
+      resistance  = clrTomato;
+      support     = clrMediumSeaGreen;
+      maxEachSide = 4;
+      labels      = true;
+      rays        = true;
+      labelShift  = 3;
+      detail      = SR_LABEL_NORMAL;
+      fontSize    = 8;
+      panel       = false;        // opt-in: the EA draws levels as a debug aid
+      panelCorner = CORNER_LEFT_UPPER;
+      panelX      = 12;
+      panelY      = 22;
+      panelText   = clrSilver;
+      panelBg     = C'22,26,34';
+     }
   };
 
 //+------------------------------------------------------------------+
@@ -311,6 +358,90 @@ int SRRank(const SRLevel &lv[], const int idx, const int minTouches, const doubl
   }
 
 //+------------------------------------------------------------------+
+//| Human units                                                      |
+//|                                                                  |
+//| A level printed as "1.16412  x3" states two things the trader    |
+//| cannot act on: a price the axis already shows, and a bare count  |
+//| with no scale attached to it. What a decision actually needs is  |
+//| how FAR the level is - in pips, because that is the unit the     |
+//| stop is set in, and in ATR, because that is the unit the EA's    |
+//| no-room-to-level veto is set in - how HARD it has held, and how  |
+//| RECENTLY. These helpers produce exactly those.                   |
+//+------------------------------------------------------------------+
+
+//--- The timeframe without MQL5's enum prefix: "H4", not "PERIOD_H4".
+string SRTFName(const ENUM_TIMEFRAMES tf)
+  {
+   const string s = EnumToString(tf);
+   return (StringFind(s, "PERIOD_") == 0 ? StringSubstr(s, 7) : s);
+  }
+
+//--- One pip for this symbol: the 3/5-digit FX convention, and the raw point
+//--- everywhere else. Deliberately NOT a table of symbol names - those go
+//--- stale the day the broker renames a suffix, and then every distance on
+//--- the chart is wrong by a factor of ten with nothing on screen saying so.
+double SRPipSize(const string symbol)
+  {
+   const double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   const int    digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   if(point <= 0.0)
+      return 0.0;
+   return ((digits == 3 || digits == 5) ? point * 10.0 : point);
+  }
+
+//--- Distance in the largest unit that still reads as a quantity. Points stop
+//--- carrying meaning somewhere around five figures: on an index or a coin
+//--- "48300 pts" is not a number anyone holds in their head, so past that
+//--- threshold this falls back to the price move itself.
+string SRFormatDist(const string symbol, const double dist)
+  {
+   const int    digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   const double unit   = SRPipSize(symbol);
+   const double d      = MathAbs(dist);
+
+   if(unit <= 0.0)
+      return DoubleToString(d, digits);
+
+   const bool   fx = (digits == 3 || digits == 5);
+   const double n  = d / unit;
+
+   if(n >= 10000.0)
+      return DoubleToString(d, digits);
+   if(n < 20.0)
+      return StringFormat("%.1f %s", n, (fx ? "pips" : "pts"));
+   return StringFormat("%.0f %s", n, (fx ? "pips" : "pts"));
+  }
+
+//--- Age the way a trader says it: "40m", "5h", "3d". One unit only - the
+//--- second one has never changed anybody's decision.
+string SRFormatAge(const datetime when, const datetime now)
+  {
+   long s = (long)(now - when);
+   if(s < 0)
+      s = 0;
+   if(s < 3600)
+      return StringFormat("%dm", (int)(s / 60));
+   if(s < 86400)
+      return StringFormat("%dh", (int)(s / 3600));
+   const int days = (int)(s / 86400);
+   if(days < 28)
+      return StringFormat("%dd", days);
+   return StringFormat("%dw", days / 7);
+  }
+
+//--- Strength as weight rather than as a number: three pivots is not "3", it
+//--- is one rung above two. Capped at five, so a heavily retested level
+//--- cannot run its own label off the right of the screen.
+string SRStrengthBar(const int touches)
+  {
+   const int n = (touches < 1 ? 1 : (touches > 5 ? 5 : touches));
+   string s = "";
+   for(int i = 0; i < n; i++)
+      s += "*";
+   return s;
+  }
+
+//+------------------------------------------------------------------+
 //| Drawing                                                          |
 //+------------------------------------------------------------------+
 void SRClear(const long chartId, const string prefix)
@@ -320,9 +451,14 @@ void SRClear(const long chartId, const string prefix)
 
 //--- Draws each level as a segment running from the pivot that started it to
 //--- the right edge, so the picture shows WHERE a level came from and not just
-//--- that it exists. Strength drives width and line style; the nearest level
-//--- on each side is labelled with its distance in ATR, which is the number
-//--- InpSRVetoATR has to be set against.
+//--- that it exists. Strength drives width and line style.
+//---
+//--- Labels are ranked R1/S1 outwards, because "the nearest resistance" is the
+//--- thing a trader actually points at, and a rank says which one this is
+//--- without the eye having to measure. Beside the rank is the distance TO it:
+//--- in ATR, the unit InpSRVetoATR is set in, and in pips, the unit the stop
+//--- is set in. The price itself is demoted to the FULL rung and the tooltip -
+//--- the axis was already printing it.
 void SRDraw(const SRLevel &lv[], const long chartId, const string prefix,
             const int minTouches, const double price, const double atr,
             const ENUM_TIMEFRAMES chartTF, const SRStyle &st)
@@ -343,8 +479,12 @@ void SRDraw(const SRLevel &lv[], const long chartId, const string prefix,
       if(st.maxEachSide > 0 && rank >= st.maxEachSide)
          continue;
 
-      const bool  above = (lv[i].price >= price);
-      const color col   = (above ? st.resistance : st.support);
+      const bool   above = (lv[i].price >= price);
+      const color  col   = (above ? st.resistance : st.support);
+      const double dist  = MathAbs(lv[i].price - price);
+
+      //--- R1 is the nearest resistance, S2 the second support out, and so on
+      const string tag = StringFormat("%s%d", (above ? "R" : "S"), rank + 1);
 
       //--- strength reads as weight, so a glance ranks the levels
       int width = 1;
@@ -365,35 +505,201 @@ void SRDraw(const SRLevel &lv[], const long chartId, const string prefix,
          ObjectSetInteger(chartId, ln, OBJPROP_BACK,       true);
          ObjectSetInteger(chartId, ln, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(chartId, ln, OBJPROP_HIDDEN,     true);
+
+         //--- the long form on hover, so the label itself can stay short
          ObjectSetString(chartId, ln, OBJPROP_TOOLTIP,
-                         StringFormat("%s  %s  touches %d  since %s",
-                                      (above ? "resistance" : "support"),
+                         StringFormat("%s  %s  %s\n%s away  (%.2f ATR)\n"
+                                      "%d touches   first %s   last %s",
+                                      tag, (above ? "resistance" : "support"),
                                       DoubleToString(lv[i].price, _Digits),
+                                      SRFormatDist(_Symbol, dist),
+                                      (atr > 0.0 ? dist / atr : 0.0),
                                       lv[i].touches,
-                                      TimeToString(lv[i].first, TIME_DATE | TIME_MINUTES)));
+                                      TimeToString(lv[i].first, TIME_DATE | TIME_MINUTES),
+                                      TimeToString(lv[i].last,  TIME_DATE | TIME_MINUTES)));
         }
 
       if(!st.labels)
          continue;
 
-      //--- Only the nearest level each side carries the ATR distance. That is
-      //--- the one the EA's no-room-to-level veto actually measures against,
-      //--- and labelling every level with it just makes noise.
-      string txt = StringFormat("%s  x%d", DoubleToString(lv[i].price, _Digits), lv[i].touches);
-      if(rank == 0 && atr > 0.0)
-         txt += StringFormat("  (%.2fxATR)", MathAbs(lv[i].price - price) / atr);
+      string txt = tag;
+      if(st.detail >= SR_LABEL_FULL)
+         txt += "  " + DoubleToString(lv[i].price, _Digits);
+      if(atr > 0.0)
+         txt += StringFormat("  %.2f ATR", dist / atr);
+      if(st.detail >= SR_LABEL_NORMAL)
+         txt += "  " + SRFormatDist(_Symbol, dist) + "  " + SRStrengthBar(lv[i].touches);
+      if(st.detail >= SR_LABEL_FULL)
+         txt += StringFormat("  %d touches, last %s", lv[i].touches,
+                             SRFormatAge(lv[i].last, now));
 
       const string tn = StringFormat("%sT%d", prefix, i);
       if(ObjectCreate(chartId, tn, OBJ_TEXT, 0, lblT, lv[i].price))
         {
          ObjectSetString(chartId, tn, OBJPROP_TEXT, txt);
          ObjectSetInteger(chartId, tn, OBJPROP_COLOR,      col);
-         ObjectSetInteger(chartId, tn, OBJPROP_FONTSIZE,   8);
+         ObjectSetInteger(chartId, tn, OBJPROP_FONTSIZE,   st.fontSize);
          ObjectSetInteger(chartId, tn, OBJPROP_ANCHOR,     ANCHOR_LEFT);
          ObjectSetInteger(chartId, tn, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(chartId, tn, OBJPROP_HIDDEN,     true);
         }
      }
+  }
+
+//+------------------------------------------------------------------+
+//| One pinned line of the summary panel                             |
+//+------------------------------------------------------------------+
+void SRPanelLine(const long chartId, const string name, const SRStyle &st,
+                 const int row, const string text, const color col)
+  {
+   //--- Consolas, so the columns line up. A proportional font turns the table
+   //--- into a ransom note the moment one price is a digit longer.
+   const int lh = (int)(st.fontSize * 1.9) + 3;
+
+   if(!ObjectCreate(chartId, name, OBJ_LABEL, 0, 0, 0))
+      return;
+   ObjectSetInteger(chartId, name, OBJPROP_CORNER,     st.panelCorner);
+   ObjectSetInteger(chartId, name, OBJPROP_XDISTANCE,  st.panelX + 8);
+   ObjectSetInteger(chartId, name, OBJPROP_YDISTANCE,  st.panelY + 6 + row * lh);
+   ObjectSetInteger(chartId, name, OBJPROP_COLOR,      col);
+   ObjectSetInteger(chartId, name, OBJPROP_FONTSIZE,   st.fontSize);
+   ObjectSetString(chartId, name, OBJPROP_FONT,        "Consolas");
+   ObjectSetString(chartId, name, OBJPROP_TEXT,        text);
+   ObjectSetInteger(chartId, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(chartId, name, OBJPROP_HIDDEN,     true);
+  }
+
+//+------------------------------------------------------------------+
+//| The summary panel.                                                |
+//|                                                                   |
+//| Per-level labels answer "what is that line?". They cannot answer  |
+//| the question actually asked before a trade - how much room is     |
+//| there, and on which side - because that answer lives in the       |
+//| relationship between two levels and the current price, and no     |
+//| single label can hold it. This block can.                         |
+//|                                                                   |
+//| Call it AFTER SRDraw: that function clears the whole prefix.      |
+//+------------------------------------------------------------------+
+void SRDrawPanel(const SRLevel &lv[], const long chartId, const string prefix,
+                 const int minTouches, const double price, const double atr,
+                 const string symbol, const ENUM_TIMEFRAMES chartTF,
+                 const string htfName, const SRStyle &st)
+  {
+   if(!st.panel || atr <= 0.0)
+      return;
+
+   const int      minT   = (minTouches < 1 ? 1 : minTouches);
+   const int      digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   const datetime now    = TimeCurrent();
+   const int      total  = ArraySize(lv);
+
+   //--- one pass for everything the panel reports: the nearest level on each
+   //--- side, how many levels cleared the touch filter, and how many of those
+   //--- actually made it onto the chart
+   int iRes = -1, iSup = -1, qualified = 0, shown = 0;
+   for(int i = 0; i < total; i++)
+     {
+      if(lv[i].touches < minT)
+         continue;
+      qualified++;
+
+      const int rank = SRRank(lv, i, minT, price);
+      if(st.maxEachSide <= 0 || rank < st.maxEachSide)
+         shown++;
+      if(rank != 0)
+         continue;
+
+      if(lv[i].price >= price)
+         iRes = i;
+      else
+         iSup = i;
+     }
+
+   const int rows = 5;
+   string ln[5];
+   color  cl[5];
+
+   ln[0] = StringFormat("HULL S/R   %s %s   HTF %s   ATR %s",
+                        symbol, SRTFName(chartTF), htfName, SRFormatDist(symbol, atr));
+   cl[0] = st.panelText;
+
+   if(iRes >= 0)
+     {
+      const double d = lv[iRes].price - price;
+      ln[1] = StringFormat("R1  %-10s  +%-11s %-9s %-5s last %s",
+                           DoubleToString(lv[iRes].price, digits),
+                           SRFormatDist(symbol, d),
+                           StringFormat("%.2f ATR", d / atr),
+                           SRStrengthBar(lv[iRes].touches),
+                           SRFormatAge(lv[iRes].last, now));
+     }
+   else
+      ln[1] = "R1  nothing above price in this lookback";
+   cl[1] = st.resistance;
+
+   if(iSup >= 0)
+     {
+      const double d = price - lv[iSup].price;
+      ln[2] = StringFormat("S1  %-10s  -%-11s %-9s %-5s last %s",
+                           DoubleToString(lv[iSup].price, digits),
+                           SRFormatDist(symbol, d),
+                           StringFormat("%.2f ATR", d / atr),
+                           SRStrengthBar(lv[iSup].touches),
+                           SRFormatAge(lv[iSup].last, now));
+     }
+   else
+      ln[2] = "S1  nothing below price in this lookback";
+   cl[2] = st.support;
+
+   //--- Where price sits INSIDE the band is the number no single label can
+   //--- carry, and it is the one that says whether a long is buying support
+   //--- or chasing into resistance.
+   if(iRes >= 0 && iSup >= 0)
+     {
+      const double band = lv[iRes].price - lv[iSup].price;
+      const double pos  = (band > 0.0 ? (price - lv[iSup].price) / band * 100.0 : 0.0);
+      ln[3] = StringFormat("price %s sits %.0f%% up a %s band  (%.2f ATR wide)",
+                           DoubleToString(price, digits), pos,
+                           SRFormatDist(symbol, band), band / atr);
+     }
+   else
+      ln[3] = StringFormat("price %s - only one side is bounded",
+                           DoubleToString(price, digits));
+   cl[3] = st.panelText;
+
+   ln[4] = StringFormat("drawn %d of %d levels with %d+ touches   (%d clustered)",
+                        shown, qualified, minT, total);
+   cl[4] = st.panelText;
+
+   //--- Backing plate first, so the text lands on top of it. Consolas advances
+   //--- roughly 0.8 px per point of font size, which is close enough to size a
+   //--- plate that never clips the longest line.
+   if(st.panelBg != clrNONE)
+     {
+      int longest = 0;
+      for(int i = 0; i < rows; i++)
+         longest = (int)MathMax(longest, StringLen(ln[i]));
+
+      const int    lh = (int)(st.fontSize * 1.9) + 3;
+      const string bg = prefix + "PBG";
+      if(ObjectCreate(chartId, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+        {
+         ObjectSetInteger(chartId, bg, OBJPROP_CORNER,      st.panelCorner);
+         ObjectSetInteger(chartId, bg, OBJPROP_XDISTANCE,   st.panelX);
+         ObjectSetInteger(chartId, bg, OBJPROP_YDISTANCE,   st.panelY);
+         ObjectSetInteger(chartId, bg, OBJPROP_XSIZE,       (int)(longest * st.fontSize * 0.80) + 22);
+         ObjectSetInteger(chartId, bg, OBJPROP_YSIZE,       rows * lh + 12);
+         ObjectSetInteger(chartId, bg, OBJPROP_BGCOLOR,     st.panelBg);
+         ObjectSetInteger(chartId, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+         ObjectSetInteger(chartId, bg, OBJPROP_COLOR,       st.panelText);
+         ObjectSetInteger(chartId, bg, OBJPROP_BACK,        false);
+         ObjectSetInteger(chartId, bg, OBJPROP_SELECTABLE,  false);
+         ObjectSetInteger(chartId, bg, OBJPROP_HIDDEN,      true);
+        }
+     }
+
+   for(int i = 0; i < rows; i++)
+      SRPanelLine(chartId, StringFormat("%sP%d", prefix, i), st, i, ln[i], cl[i]);
   }
 
 #endif // HULLTREND_SR_MQH

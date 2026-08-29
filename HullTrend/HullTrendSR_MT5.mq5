@@ -21,8 +21,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "1.00"
+#property version   "1.10"
 #property description "Support / resistance levels from clustered pivot fractals."
+#property description "Labels rank them R1/S1 outwards and give the distance in ATR and pips."
 #property description "Shares the Hull Trend EA's engine - match the EA's group F inputs"
 #property description "and this draws exactly the levels it trades against."
 
@@ -57,16 +58,27 @@ input group                  "Appearance"
 input color           InpColorRes     = clrTomato;      // Levels above price (resistance)
 input color           InpColorSup     = clrMediumSeaGreen; // Levels below price (support)
 input int             InpMaxEachSide  = 4;              // Draw only the nearest N each side (0 = all)
-input bool            InpLabels       = true;           // Price / touches text
+input bool            InpLabels       = true;           // Per-level text beside each line
+input ENUM_SR_LABEL   InpLabelDetail  = SR_LABEL_NORMAL;// How much that text says
+input int             InpFontSize     = 8;              // Font size for labels and panel
 input bool            InpRays         = true;           // Extend lines to the right edge
 input int             InpLabelShift   = 3;              // Label offset to the right (bars)
 input int             InpRedrawSecs   = 5;              // Intrabar refresh of colours/labels (secs, 0 = new bar only)
+
+input group                  "Summary panel"
+input bool             InpPanel       = true;           // Show the R1 / S1 summary panel
+input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER; // Which corner it hangs from
+input int              InpPanelX      = 12;             // Inset from that corner, X (pixels)
+input int              InpPanelY      = 22;             // Inset from that corner, Y (pixels)
+input color            InpPanelText   = clrSilver;      // Panel text colour
+input color            InpPanelBg     = C'22,26,34';    // Panel backing plate (clrNONE = none)
 
 //--- state
 SRLevel  g_sr[];
 int      g_hATR    = INVALID_HANDLE;
 datetime g_lastBar  = 0;
 datetime g_lastDraw = 0;
+ENUM_TIMEFRAMES g_htf = PERIOD_CURRENT;   // resolved once in OnInit, reported by the panel
 string   g_prefix  = "HullSRv_";     // "v" for viewer - must NOT collide with the
                                      // EA's own "HullSR_" objects on the same chart
 
@@ -87,8 +99,8 @@ int OnInit()
    //--- The resolved configuration, for the same reason the trend indicator
    //--- prints its own: these values have to match the EA's group F, and the
    //--- only way to check that is to read both log lines side by side.
-   const ENUM_TIMEFRAMES htf = SRPickHTF((ENUM_TIMEFRAMES)_Period, InpHTFAuto,
-                                         InpHTF, InpHTFMult);
+   g_htf = SRPickHTF((ENUM_TIMEFRAMES)_Period, InpHTFAuto, InpHTF, InpHTFMult);
+   const ENUM_TIMEFRAMES htf = g_htf;
    PrintFormat("Hull Trend S/R config: fractal=%d lookback=%d cluster=%.2fxATR minTouches=%d "
                "maxAge=%d atrPeriod=%d htf=%s",
                InpFractal, InpLookback, InpClusterATR, InpMinTouches,
@@ -153,7 +165,7 @@ int OnCalculate(const int rates_total,
       cfg.fractal    = InpFractal;
       cfg.lookback   = InpLookback;
       cfg.useHTF     = InpUseHTF;
-      cfg.htf        = SRPickHTF((ENUM_TIMEFRAMES)_Period, InpHTFAuto, InpHTF, InpHTFMult);
+      cfg.htf        = g_htf;
       cfg.clusterATR = InpClusterATR;
       cfg.maxAgeBars = (InpMaxAgeBars > 0 ? InpMaxAgeBars
                         : 20 * (InpHMAPeriod > 0 ? InpHMAPeriod : 20));
@@ -178,9 +190,24 @@ int OnCalculate(const int rates_total,
       st.labels      = InpLabels;
       st.rays        = InpRays;
       st.labelShift  = InpLabelShift;
+      st.detail      = InpLabelDetail;
+      st.fontSize    = (InpFontSize < 6 ? 6 : InpFontSize);
+      st.panel       = InpPanel;
+      st.panelCorner = InpPanelCorner;
+      st.panelX      = InpPanelX;
+      st.panelY      = InpPanelY;
+      st.panelText   = InpPanelText;
+      st.panelBg     = InpPanelBg;
 
-      SRDraw(g_sr, 0, g_prefix, InpMinTouches, close[rates_total - 1], atr[0],
+      const double last = close[rates_total - 1];
+      SRDraw(g_sr, 0, g_prefix, InpMinTouches, last, atr[0],
              (ENUM_TIMEFRAMES)_Period, st);
+
+      //--- After SRDraw, never before: that call clears every object under the
+      //--- prefix, panel included.
+      SRDrawPanel(g_sr, 0, g_prefix, InpMinTouches, last, atr[0], _Symbol,
+                  (ENUM_TIMEFRAMES)_Period,
+                  (InpUseHTF ? SRTFName(g_htf) : "off"), st);
       g_lastDraw = TimeCurrent();
       ChartRedraw();
      }

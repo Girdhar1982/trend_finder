@@ -2,7 +2,7 @@
 
 **A Hull Moving Average trend-flip system: a whipsaw-filtered trend indicator and a stop-and-reverse Expert Advisor.**
 
-Version 2.30 (indicator) · 1.00 (S/R indicator) · 1.40 (EA) · Last updated 2026-08-28
+Version 2.30 (indicator) · 1.10 (S/R indicator) · 1.40 (EA) · Last updated 2026-08-29
 
 ---
 
@@ -323,6 +323,23 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 ---
 
 ## 16. Version history
+
+### S/R indicator 1.10
+- **Changed:** the on-chart numbers now answer the question being asked. A label used to read
+  `1.16412  x3` — a price the chart's own axis was already printing, and a bare count with no
+  scale attached. It now reads `R1  0.42 ATR  38 pips  ***`: the level's rank counting outwards
+  from price, its distance in the unit `InpSRVetoATR` is set in *and* the unit the stop is set
+  in, and strength as weight rather than as a digit. The price moved to the tooltip and to the
+  new **Full** detail rung, where it belongs.
+- **Added:** `InpLabelDetail` (Compact / Normal / Full) and `InpFontSize`.
+- **Added:** a summary panel (`InpPanel`, on by default) reporting R1 and S1 with their distance,
+  strength and age, where price sits inside that band as a percentage, and how many levels are
+  drawn versus found. The band position is the one quantity no per-level label can carry.
+- **Added:** `SRFormatDist()` picks the unit per symbol — pips on 3/5-digit FX, points elsewhere,
+  and the raw price move once the point count passes five figures. No table of symbol names, so
+  a broker renaming a suffix cannot silently make every distance wrong by a factor of ten.
+- `SRStyle` gained a constructor. New drawing fields therefore default sanely for callers written
+  before they existed, which is what lets the EA's `InpSRDraw` path compile and improve untouched.
 
 ### S/R indicator 1.00 (new)
 - `HullTrendSR_MT5.mq5` draws the support/resistance levels the EA trades against.

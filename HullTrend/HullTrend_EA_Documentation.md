@@ -594,7 +594,32 @@ Attach **`HullTrendSR_MT5`** to the same chart. It shares the EA's engine (`Hull
 | Line start | The pivot that created the level — you can see where it came from, not just that it exists |
 | Colour | Red above the current price (resistance), green below (support). Levels switch side as price crosses them |
 | Width / style | Dotted and thin = 2 touches; solid = 3+; thickest = 6+ |
-| Label | `price ×touches`, plus `(0.82×ATR)` on the **nearest level each side** — that is the exact quantity `InpSRVetoATR` is compared against |
+| Label | `R1  0.42 ATR  38 pips  ***` — the level's **rank** (R1/S1 = nearest, counting outwards), then how far away it is in ATR (the exact quantity `InpSRVetoATR` is compared against) and in pips (what the stop is sized in), then strength as one `*` per touch, capped at five |
+| Label detail | `InpLabelDetail`: **Compact** = rank + ATR only; **Normal** (default) = + pips + strength; **Full** = + the price, the touch count and how long since the level was last touched |
+| Tooltip | Hover any line for the long form: price, distance in both units, touch count, and the first/last pivot timestamps |
+| Panel | A summary block in the chart corner (`InpPanel`) — see below |
+
+The panel is the part a label cannot do, because the useful quantity lives *between* two levels:
+
+```
+HULL S/R   EURUSD M15   HTF H4   ATR 4.2 pips
+R1  1.16412   +38.0 pips   0.42 ATR   ***   last 5h
+S1  1.16050   -18.4 pips   0.20 ATR   **    last 2d
+price 1.16234 sits 33% up a 56.4 pips band  (0.62 ATR wide)
+drawn 6 of 9 levels with 2+ touches   (14 clustered)
+```
+
+- **Line 2 / 3** — the two levels the EA's veto actually measures against, with the distance
+  in both units and how recently each was last defended.
+- **Line 4** — where price sits inside the band. This is what says whether a long is buying
+  support or chasing into resistance; no single level label can carry it.
+- **Line 5** — how much of the level set you are actually looking at. `drawn` is capped by
+  `InpMaxEachSide`; the gap between `with 2+ touches` and `clustered` is what `InpMinTouches`
+  is filtering out.
+
+Distances are shown in pips on 3- and 5-digit FX symbols and in points elsewhere; on
+instruments where the point count runs past five figures (indices, coins) the raw price move
+is printed instead, because "48300 pts" is not a number anyone holds in their head.
 
 **Match these inputs to the EA or the picture is fiction:** `InpFractal`, `InpLookback`, `InpClusterATR`, `InpMinTouches`, `InpMaxAgeBars`, `InpATRPeriod`, and the whole higher-timeframe group. Both programs print their resolved configuration at `OnInit` (`Hull Trend S/R config: …` and the EA's `ENV | S/R …` line) — read them side by side once.
 
@@ -645,8 +670,8 @@ Recommended procedure, one change at a time against the same backtest:
    rate **and** total R — not total R alone.
 3. Only then touch `InpSRTargetPart`, and only then `InpSRStop`.
 4. Attach `HullTrendSR_MT5` and confirm the levels land where you would have drawn them
-   by hand. Read the `(x.xx×ATR)` label on the nearest level each side: that is the
-   number `InpSRVetoATR` has to sit below.
+   by hand. The `R1` and `S1` rows of its panel carry the ATR distance to the nearest level
+   each side: that is the number `InpSRVetoATR` has to sit below.
 
 ### The cheaper experiment to run first
 
