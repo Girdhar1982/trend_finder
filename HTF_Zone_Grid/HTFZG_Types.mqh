@@ -36,6 +36,26 @@ enum ENUM_HTFZG_DIR
   };
 
 //+------------------------------------------------------------------+
+//| How strict the higher-timeframe trend test is.                   |
+//|                                                                  |
+//| The strict form (average AND both swing legs) is the safest read |
+//| of the spec and the right default, but on a backtest it rejects  |
+//| ~60% of all bars on both gold and XRP - it is the single binding |
+//| constraint on trade count, far ahead of the score gate. Exposing |
+//| it makes that trade-off measurable instead of structural.        |
+//|                                                                  |
+//|   STRICT   close vs EMA  AND  HH AND HL   (spec, default)        |
+//|   RELAXED  close vs EMA  AND  HH OR  HL                          |
+//|   EMA_ONLY close vs EMA                                          |
+//+------------------------------------------------------------------+
+enum ENUM_HTFZG_TREND
+  {
+   HTFZG_TREND_STRICT   = 0,   // Strict: EMA + HH + HL
+   HTFZG_TREND_RELAXED  = 1,   // Relaxed: EMA + (HH or HL)
+   HTFZG_TREND_EMA_ONLY = 2    // EMA only
+  };
+
+//+------------------------------------------------------------------+
 //| The EA state machine. Exactly one grid per symbol, ever, so this |
 //| is a single variable and not a collection.                       |
 //|                                                                  |
@@ -69,7 +89,8 @@ struct HTFZGZone
    int               touches;       // how many times price respected it
    bool              valid;
 
-                     HTFZGZone() { high=0; low=0; formed=0; touches=0; valid=false; }
+                     HTFZGZone() { Reset(); }
+   void              Reset() { high=0; low=0; formed=0; touches=0; valid=false; }
    double            Mid()    const { return (high + low) * 0.5; }
    double            Height() const { return high - low; }
   };
@@ -107,7 +128,7 @@ struct HTFZGSignal
                      HTFZGSignal() { Reset(); }
    void              Reset()
      {
-      dir=HTFZG_DIR_NONE; zone=HTFZGZone(); sweepExtreme=0; bosPrice=0;
+      dir=HTFZG_DIR_NONE; zone.Reset(); sweepExtreme=0; bosPrice=0;
       atr15=0; atr5=0;
       sTrend=0; sZone=0; sPivot=0; sSweep=0; sBOS=0; sVol=0; total=0;
       reject="";
@@ -131,7 +152,8 @@ struct HTFZGLevel
    bool              filled;
    bool              isMarket;      // true only for Level 1
 
-                     HTFZGLevel() { price=0; lots=0; ticket=0; placed=false; filled=false; isMarket=false; }
+                     HTFZGLevel() { Reset(); }
+   void              Reset() { price=0; lots=0; ticket=0; placed=false; filled=false; isMarket=false; }
   };
 
 //+------------------------------------------------------------------+
@@ -157,6 +179,7 @@ struct HTFZGGrid
    double            avgEntry;      // volume-weighted, recomputed on each fill
 
    bool              tp1Done;
+   double            realised;      // this grid's own closed PnL - the spec's "result"
    datetime          opened;
    datetime          expiry;        // pendings die here (InpPendingExpiryHours)
 
@@ -169,9 +192,9 @@ struct HTFZGGrid
    void              Reset()
      {
       dir=HTFZG_DIR_NONE; count=0; sharedSL=0; oneR=0; tp1=0; tp2=0; avgEntry=0;
-      tp1Done=false; opened=0; expiry=0; score=0; zHigh=0; zLow=0; sweepExtreme=0;
+      tp1Done=false; realised=0; opened=0; expiry=0; score=0; zHigh=0; zLow=0; sweepExtreme=0;
       for(int i=0; i<HTFZG_MAX_LEVELS; i++)
-         lv[i] = HTFZGLevel();
+         lv[i].Reset();
      }
    int               FilledCount() const
      {

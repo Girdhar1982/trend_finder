@@ -2,7 +2,7 @@
 
 **A Hull Moving Average trend-flip system: a whipsaw-filtered trend indicator and a stop-and-reverse Expert Advisor.**
 
-Version 2.30 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicator) · 1.40 (EA) · Last updated 2026-08-29
+Version 2.30 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicator) · 1.00 (FVG indicator) · 1.10 (breakout indicator) · 1.40 (EA) · Last updated 2026-08-29
 
 ---
 
@@ -24,7 +24,8 @@ Version 2.30 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicat
 14. [Known limitations](#14-known-limitations)
 15. [Maintenance checklist](#15-maintenance-checklist)
 16. [Liquidity grabs](#16-liquidity-grabs)
-17. [Version history](#17-version-history)
+17. [Range breakouts](#17-range-breakouts)
+18. [Version history](#18-version-history)
 
 ---
 
@@ -37,6 +38,8 @@ market structure around them:
 - **`HullTrendEA*.mq5`** — a **stop-and-reverse** trend follower that trades the flips the indicator publishes. The natural exit is the opposite flip; the stop is a disaster brake, not a target.
 - **`HullTrendSR_MT5.mq5`** — draws the support/resistance levels the EA vetoes against, from the very engine the EA runs. Documented in `HullTrend_EA_Documentation.md` §23.
 - **`HullTrendLG_MT5.mq5`** — marks **liquidity grabs**: bars that pierce a recent swing and close back inside it. Standalone; no EA reads it. See §16.
+- **`HullTrendFVG_MT5.mq5`** — draws **higher-timeframe fair value gaps, order blocks and BOS/CHoCH** on the trading chart (H4 zones on an M15 chart by default) and scores the entry. Standalone; no EA reads it. Documented separately in `HullTrendFVG_Documentation.md`.
+- **`HullTrendBO_MT5.mq5`** — marks the **N most recent range breakouts** on a timeframe you choose, with the range that broke, how hard it pushed, how far it ran, and which ones failed. Standalone; no EA reads it. See §17.
 
 > **Cost warning (read this first).** A flip system pays the spread on *every* reversal. Round-trip cost as a fraction of ATR(14) is roughly **0.5–0.9× on M1 FX, 0.25–0.4× on M5 and 0.12–0.2× on M15**. M1 on retail FX does not clear its own costs. **M5 is the practical floor for majors**; M1 only makes sense where the spread is tiny relative to the range (index CFDs, futures).
 
@@ -104,6 +107,10 @@ Files belong in your terminal's data folder (**File → Open Data Folder** in MT
 | `HullTrendSR_MT5.mq5` | `MQL5\Indicators\` |
 | `HullTrendSR.mqh` | `MQL5\Include\` — **shared by the EA and the S/R indicator**, one copy only |
 | `HullTrendLG_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendFVG_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendFVG.mqh` | `MQL5\Include\` |
+| `HullTrendBO_MT5.mq5` | `MQL5\Indicators\` |
+| `HullTrendBO.mqh` | `MQL5\Include\` |
 | `HullTrendLG.mqh` | `MQL5\Include\` — the liquidity-grab engine |
 | `HullTrendEA.mq5` | `MQL5\Experts\` |
 | `HullTrendEA_Forex.mq5` | `MQL5\Experts\` |
@@ -446,7 +453,284 @@ tooltip carries the full detail.
 
 ---
 
-## 17. Version history
+## 17. Range breakouts
+
+`HullTrendBO_MT5.mq5` marks the **N most recent range breakouts** (default 3) on a timeframe you
+choose, and prints them to the Experts log.
+
+**This is the mirror of §16.** A liquidity grab pierces a level and closes back *inside* it — the
+breakout failed. This indicator records the bar that closes *outside* and stays there. Same
+geometry, opposite verdict; run both and the chart says which levels gave way and which ones only
+pretended to.
+
+No EA reads this indicator. It is a chart study and a log, nothing more.
+
+### 17.1 Which timeframe it works on
+
+**Any.** `InpTF` selects the timeframe the *scan* runs on, independently of the chart:
+
+- `PERIOD_CURRENT` (default) — scan whatever the chart is showing. M5 chart, M5 breakouts.
+- Any explicit timeframe — the scan runs there and the markers still land on **this** chart. An M15
+  chart showing H4 breakouts is one picture, not two windows.
+
+The panel header names the scanned timeframe, and adds the chart timeframe after it when the two
+differ, so a screenshot can never be ambiguous about which bars produced the levels.
+
+Everything is quoted in the **ATR of the scanned timeframe** — the ruler the levels were built with.
+
+### 17.2 How a breakout is detected
+
+`BOScan()` in `HullTrendBO.mqh`, run over a newest-first bar series:
+
+1. **The range is the bars *before* the bar.** For a bar at shift `i` the range is the highest high
+   and lowest low over shifts `i+1 … i+InpRangeBars`. A bar can never break a level that includes
+   its own extreme.
+2. **A close, not a wick.** The bar must *close* beyond the edge, by at least
+   `InpMinBreakATR × ATR`. A one-tick poke through a level is noise.
+3. **One breakout per move — the arming rule.** In a trend every bar closes above a rolling range
+   high, so a naive detector reports forty breakouts for one move. A direction is **armed** once,
+   **spends** itself on the break, and is only **re-armed** when price closes back inside the level
+   it broke. "Three recent breakouts" therefore means three separate moves, not three bars of the
+   same one.
+4. **Closed bars only.** The walk ends at shift 1 and every verdict reads closed bars only. Nothing
+   repaints: a marker can appear one bar late, but it never moves once drawn. The one value that
+   tracks the live bar is MFE, and a move can extend but never un-extend.
+
+> The walk covers bars **older** than the reporting window on purpose. Arming is a running state, so
+> the scan has to see what came before the window to know whether a break inside it is a new move or
+> the tail of an old one.
+
+### 17.3 How you know whether it is valid
+
+Two questions, and they are answerable at **different times**. The indicator keeps them apart, and
+that separation is the substance of this section.
+
+#### The score — known the moment the bar closes
+
+Four things, all visible on the breakout bar and the range behind it. Nothing from the future.
+
+| Component | Weight | What earns full marks | Why it matters |
+|---|---|---|---|
+| **Push** | 30 | Closing `0.5 × ATR` or more past the level | A close that barely clears the edge has not committed to anything |
+| **Close** | 30 | Closing at the extreme of its own bar | Closing mid-bar after a long wick is a bar that broke out and then thought better of it |
+| **Compression** | 20 | A range `1.5 × ATR` tall or tighter (nothing at `6 × ATR`) | A break out of a coil is worth more than the same break out of a wide chop, where the "level" was never a level anybody watched |
+| **Volume** | 20 | Twice the average tick volume of the range bars | A break nobody turned up for is a break nobody has to respect. Equal to the average scores **zero** |
+
+Weighted into **0–100** and graded: **STRONG** ≥ 75, **FAIR** ≥ 50, **WEAK** ≥ 25, **POOR** below.
+
+The score is never just asserted at you. The panel shows the newest breakout broken into its four
+parts, the tooltip shows all four for any breakout, and the log prints a `SCORE` line beside every
+`BREAK` line. It is an argument you can disagree with on specific grounds, not a verdict.
+
+The calibration constants are **not** inputs. A score is only worth something if it means the same
+thing on every chart it is read from; a per-chart calibration is not a score, it is a second
+opinion. What *is* an input is `InpMinScore` — the bar you hold breakouts to — because that is a
+judgement rather than a definition.
+
+#### The status — known only later
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | The `InpConfirmBars` window has **not elapsed yet**. Whether it held is not yet known |
+| `held` | It survived the window without closing back inside the level |
+| `FAILED` | It closed back inside the level it broke |
+
+**A breakout inside its confirmation window is `PENDING`, not "held".** Reporting a one-bar-old
+breakout as held would be a claim about bars that have not happened. The newest breakout on a live
+chart is normally `PENDING` — that is the honest answer, and it is the one the panel gives.
+
+A high score that later FAILS is not a contradiction; it is the market. Keeping the two apart is
+what lets you see that pattern instead of hiding it.
+
+#### Using them
+
+- `InpMinScore` hides breakouts below a score — set it to 50 to see only FAIR and better.
+- `InpAlertMinScore` is **separate on purpose**: plenty of people want every break drawn for context
+  but only want to be woken for the good ones.
+
+### 17.4 Reading the chart
+
+```
+      _______________________
+     |                       |            <- the range that broke (dotted outline)
+     |    the 20-bar range   |
+     |_______________________|___ _ _ _ _ _ _ _ _ _  the level, carried right
+                              \
+                               \|/  chunky arrow on the bar that closed through
+                                v
+                    BO1 UP  82 STRONG  PENDING  ->2.4A
+                             |    |        |        |
+                         score  grade   status   how far it has run
+```
+
+- The **newest** breakout gets a thicker arrow and a thicker level line.
+- A **grey** marker is one that **FAILED**. It is still information — this level does not hold — but
+  it is not a direction, and colouring it like one would say it was. A `PENDING` breakout keeps its
+  full colour, because it is the live one and the most likely to matter.
+- The level is carried right because a broken level is the first thing price tests on the way back.
+- Hover any arrow for the full score breakdown.
+
+The panel:
+
+```
+HULL BREAKOUT   EURUSD   H1 on M15   range 20 bars   H1 ATR 18.4 pips
+#1  DOWN 1.16040    82 STRONG  push 0.42A  ran  1.85A  PENDING  6h ago
+#2  UP   1.16610    41 WEAK    push 0.31A  ran  0.22A  FAILED   2d ago
+#3  UP   1.16180    67 FAIR    push 0.55A  ran  2.90A  held     4d ago
+  #1 score 82 = push 30 + close 26 + compression 14 + volume 12   (of 30/30/20/20)
+of the last 3: 1 held, 1 failed, 1 still inside the 3-bar window
+```
+
+### 17.5 Colours — why this one is cyan and yellow
+
+Every other study in this suite ships **green for up, red for down**: the trend line, S/R, liquidity
+grabs, and the FVG zones all use that pair. Put two of them on one chart and the colour stops saying
+*which study drew this marker*, which is the thing you need to know first.
+
+So this one is different by default, on two axes at once:
+
+| | This study | The others |
+|---|---|---|
+| Up / down | **cyan / yellow** | green / red |
+| Arrow glyph | **241 / 242** (chunky blocks) | 233 / 234 (thin arrows) |
+| Range box | **outline only** | FVG zones are filled |
+
+Direction is carried by the arrow shape, the level line and the label, which frees colour to
+identify the study. All of it is an input — `InpColorUp`, `InpColorDown`, `InpArrowUp`,
+`InpArrowDown`, `InpFillRange` — so anyone who disagrees can say so in one click.
+
+> **If things still collide**, the fastest fixes are: turn off `InpShowRange` on whichever study you
+> care about less, move one panel with `InpPanelCorner`, or set `InpExtendLevel = false` so the
+> broken levels stop competing with S/R lines.
+
+### 17.6 Input reference — breakouts
+
+**Which timeframe to scan**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpTF` | `PERIOD_CURRENT` | Timeframe the scan runs on (`CURRENT` = the chart) |
+
+**Detection**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpCount` | `3` | How many recent breakouts to show (`0` = all found) |
+| `InpRangeBars` | `20` | Bars before each bar that define the range. Floored at 2 |
+| `InpMinBreakATR` | `0.15` | The close must clear the level by this × ATR |
+| `InpConfirmBars` | `3` | Bars in which a close back inside marks it **FAILED** (`0` = never) |
+| `InpMinScore` | `0` | Hide breakouts scoring below this, 0–100 (`0` = show all) |
+| `InpLookback` | `300` | Bars scanned. Floored at 50 |
+| `InpMaxAgeBars` | `0` | Ignore breakouts older than N **bars** (`0` = use `InpLookback`) |
+| `InpATRPeriod` | `14` | ATR period for the push / run scale |
+
+**Appearance**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpColorUp` / `InpColorDown` | `clrAqua` / `clrYellow` | Broke the range high / low. **Not** green/red — see §17.5 |
+| `InpColorFailed` | `clrDimGray` | …and closed back inside |
+| `InpFillRange` | `false` | Fill the range box, or draw the outline only |
+| `InpArrowUp` / `InpArrowDown` | `241` / `242` | Wingdings codes. Distinct from the 233/234 the other studies use |
+| `InpShowRange` | `true` | Draw the range that was broken |
+| `InpShowLevel` | `true` | Draw the level that gave way |
+| `InpExtendLevel` | `true` | Carry that level to the right edge |
+| `InpLabels` | `true` | Text beside each marker |
+| `InpRedrawSecs` | `5` | Intrabar refresh (`0` = new bar only) |
+
+**Alerts**
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpEnableAlert` | `true` | Pop-up when a **new** breakout confirms |
+| `InpAlertMinScore` | `0` | …only if it scores at least this (`0` = any) |
+
+Plus sound / push / email, and the usual panel block. **Alerts never fire on the attach pass** — the
+newest breakout in the lookback may be days old, and waking someone for it teaches them to ignore
+the alert that matters.
+
+### 17.7 Tuning
+
+| Symptom | Knob |
+|---|---|
+| Too many marginal breaks | Raise `InpMinBreakATR` to 0.3–0.5, or set `InpMinScore` to 50 |
+| Only want the good ones | `InpMinScore = 75` — STRONG only |
+| Want them all drawn but only alerted on the good ones | Leave `InpMinScore = 0`, set `InpAlertMinScore = 75` |
+| Breakouts of trivial ranges | Raise `InpRangeBars` to 40–50 — this also lifts the compression score |
+| Everything says FAILED | The symbol is mean-reverting at this range size — raise `InpRangeBars`, or trade the fade |
+| Everything says PENDING | `InpConfirmBars` is longer than the breakouts are old. Lower it, or wait |
+| Scores are always low on volume | Some CFD feeds have flat tick volume; that component will sit near 0. Judge on the other three |
+| Clashing with another Hull study | See §17.5 |
+
+### 17.8 Testing
+
+**`HullTrendBO_SelfTest.mq5` — run it after any edit to `HullTrendBO.mqh`. Non-negotiable.**
+
+It drives the walk with a hand-built 13-bar series containing one of every case — a clean breakout,
+a continuation bar that must be suppressed, a re-entry that must re-arm, a breakout that fails, one
+still `PENDING`, and one the other way — with **hand-computed scores and component values** for all
+three, so a change to any weight or calibration constant shows up here as a number rather than as a
+slightly different chart nobody notices. Then it runs the whole engine over real history and
+re-derives every breakout from its own range bars.
+
+Drag it onto any chart and read the Experts tab, or run it headlessly with `bo_selftest.ini` (see
+§12) **while the terminal is closed** — one instance per data folder, so a `/config:` launch is
+silently refused when MT5 is already open.
+
+Baseline at v1.10, EURUSD M15 / H1, 2026-08-20 → 2026-08-28: **109 passed, 0 failed**; 3 breakouts
+found in the last 300 H1 bars, all three re-derived from their own range bars.
+
+## 18. Version history
+
+### Breakout indicator 1.10
+
+- **Fixed, and it mattered:** a breakout inside its confirmation window reported as **"held"**. It
+  had no way to know that — the bars had not happened. Status is now three-valued, `PENDING` until
+  the window has actually elapsed, then `held` or `FAILED`. On a live chart the newest breakout is
+  normally `PENDING`, which is the honest answer and the one a breakout trader needs.
+- **Added a score.** 0–100 from four things visible on the breakout bar itself — push past the level
+  (30), where the close sat in its own bar (30), how tight the range was (20), and volume expansion
+  against the range average (20) — graded STRONG / FAIR / WEAK / POOR. The panel, the tooltip and
+  the log all show the four parts, so it is an argument rather than a verdict. `InpMinScore` hides
+  the weak ones; `InpAlertMinScore` gates alerts separately, because wanting every break drawn for
+  context and wanting to be woken only for good ones are different wishes.
+- The calibration constants are deliberately **not** inputs — a score is only worth something if it
+  means the same thing on every chart it is read from. The one judgement, `minScore`, is an input.
+- The score filter runs **after** the walk, never inside it: a hidden breakout still happened and
+  still spent the arming, so filtering must not promote the next bar of the same move into a fresh
+  breakout. Asserted in the self-test.
+- **Recoloured to stop colliding with the rest of the suite.** Cyan / yellow instead of green / red,
+  chunky 241/242 arrows instead of the 233/234 every other study uses, and the range box is an
+  outline rather than a fill so it does not read like an FVG zone. Every one of those is an input
+  (§17.5).
+- Self-test grown from 59 to **109 assertions**, 0 failures — including hand-computed scores for all
+  three breakouts in the built series and every status transition.
+
+### Breakout indicator 1.00 (new)
+- `HullTrendBO_MT5.mq5` marks the N most recent range breakouts on a **selectable** timeframe and
+  lists them in the Experts tab (§17). The scan timeframe is independent of the chart, so an M15
+  chart can show H4 breakouts.
+- The detection lives in `HullTrendBO.mqh` (`MQL5\Include\`), split into a pure `BOScan()` over a
+  bar array and a `BOCollect()` that fetches one — the same split as `HullTrendFVG.mqh`, and for the
+  same reason: a detector that can only be driven by live bars can only be checked against whatever
+  the market happened to do.
+- **The arming rule** is the substance of it: a direction is armed once, spent on the break, and
+  re-armed only when price closes back inside the level it broke. Without it a single trending move
+  reports one breakout per bar.
+- Every breakout carries its own outcome — how far it ran, and whether it failed back inside the
+  level within `InpConfirmBars`. Failed ones are drawn grey rather than hidden.
+- Non-repainting by construction: a breakout needs a closed bar, and the failure verdict reads
+  closed bars only.
+- Self-test: `HullTrendBO_SelfTest.mq5`, 59 assertions, 0 failures on EURUSD M15/H1.
+
+### FVG indicator 1.00 (new)
+- `HullTrendFVG_MT5.mq5` draws higher-timeframe fair value gaps, order blocks and BOS/CHoCH on the
+  trading chart, and scores the entry against a chart-timeframe structure break. Documented
+  separately in `HullTrendFVG_Documentation.md`.
+- The detection lives in `HullTrendFVG.mqh` (`MQL5\Include\`), which reuses `HullTrendSR.mqh` for
+  timeframe resolution so that the HTF a chart resolves to is the same answer everywhere in this
+  suite.
+- Self-test: `HullTrendFVG_SelfTest.mq5`, 74 assertions, 0 failures on EURUSD M15/H4.
 
 ### Liquidity-grab indicator 1.00 (new)
 - `HullTrendLG_MT5.mq5` marks liquidity grabs on the chart and lists the recent ones in the
