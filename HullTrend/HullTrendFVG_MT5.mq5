@@ -47,6 +47,7 @@
 #property indicator_buffers 0
 #property indicator_plots   0
 
+#include "HullTrendRelay.mqh"
 #include <HullTrendFVG.mqh>
 
 //+------------------------------------------------------------------+
@@ -209,6 +210,9 @@ void FireAlert(const FVGSetup &su)
    //--- Always on the record, whatever the channels are set to. An alert that
    //--- fired at 3am and was dismissed leaves no trace anywhere else.
    Print("HullFVG | ALERT | " + msg);
+
+   //--- Telegram, via the relay EA: WebRequest is illegal here
+   HTRelayPublish(HT_KIND_FVG, su.dir > 0, su.time, (ENUM_TIMEFRAMES)_Period);
   }
 
 //+------------------------------------------------------------------+

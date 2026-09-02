@@ -2,7 +2,7 @@
 
 **A Hull Moving Average trend-flip system: a whipsaw-filtered trend indicator and a stop-and-reverse Expert Advisor.**
 
-Version 2.30 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicator) · 1.00 (FVG indicator) · 1.10 (breakout indicator) · 1.40 (EA) · Last updated 2026-08-29
+Version 2.60 (indicator) · 1.20 (S/R indicator) · 1.00 (liquidity-grab indicator) · 1.00 (FVG indicator) · 1.10 (breakout indicator) · 1.40 (EA) · Last updated 2026-08-31
 
 ---
 
@@ -61,7 +61,7 @@ market structure around them:
 │                                                          │
 │  Outputs: 7 buffers, colour-coded line, arrows           │
 └────────────────────────┬─────────────────────────────────┘
-                         │ iCustom (24 args) + CopyBuffer
+                         │ iCustom (27 args) + CopyBuffer
                          ▼
 ┌──────────────────────────────────────────────────────────┐
 │  HullTrendEA*.mq5                (MQL5\Experts\)         │
@@ -254,9 +254,12 @@ The cost of that rule is that a reversal landing on the exact bar you attach to 
 | Input | Default | Notes |
 |---|---|---|
 | `InpSignalBar` | `SIGNAL_CLOSED_BAR` | Closed bar (confirmed) or current bar (can repaint) |
-| `InpEnableAlert` | `true` | Pop-up alert |
-| `InpEnableSound` | `false` | Sound alert |
-| `InpSoundFile` | `alert.wav` | Sound file |
+| `InpEnableAlertBull` | `true` | Pop-up alert on a bullish reversal |
+| `InpEnableAlertBear` | `true` | Pop-up alert on a bearish reversal |
+| `InpEnableSoundBull` | `false` | Sound alert on a bullish reversal |
+| `InpSoundFileBull` | `alert.wav` | Sound file for bullish reversals |
+| `InpEnableSoundBear` | `false` | Sound alert on a bearish reversal |
+| `InpSoundFileBear` | `alert2.wav` | Sound file for bearish reversals. Both defaults ship with the terminal (`Sounds\`), so the two directions are audibly distinct out of the box |
 | `InpEnablePush` | `false` | Mobile push |
 | `InpEnableEmail` | `false` | Email |
 | `InpAlertOnAttach` | `false` | Also evaluate the bar you attach on. Off by default: a reversal sitting on the attach bar is not replayed |
@@ -289,6 +292,125 @@ Hull Trend (20) BULLISH reversal on EURUSD M15 at 2026.08.26 12:15
 ```
 
 The subject and message include the symbol and a readable timeframe name (`PERIOD_H1` → `H1`).
+
+Each direction has its own controls. Pop-up alerts and sounds are switched per direction:
+`InpEnableAlertBull` / `InpEnableSoundBull` + `InpSoundFileBull` govern bullish reversals,
+`InpEnableAlertBear` / `InpEnableSoundBear` + `InpSoundFileBear` govern bearish ones. That way
+a long signal and a short signal cannot be confused by ear. Push and email remain single master
+switches that fire for either direction.
+
+### 10.1 Telegram
+
+**The indicator cannot send to Telegram itself.** MQL5 prohibits `WebRequest()` in
+indicators - it is legal only in EAs and scripts - so no amount of terminal
+configuration will make a direct send work. Delivery is therefore split in two:
+
+```
+HullTrend_MT5 (indicator)          HullTrendTelegramRelay (EA)
+  reversal detected                  OnTimer, every InpPollSeconds
+        |                                     |
+        | always, no switch                    | reads HT_SIG_*, compares HT_ACK_*
+        v                                     v
+  GlobalVariableSet(               -->   TelegramSend()  --> api.telegram.org
+    "HT_SIG_EURUSD_M15", +/-barTime)      (WebRequest, legal in an EA)
+```
+
+There is **no switch to enable**. The indicator publishes every reversal unconditionally - a `GlobalVariableSet` is nearly free and inert when no relay is running, so gating it behind an input would only create a way to miss alerts silently. Delivery is turned on and off by attaching or removing the relay EA.
+
+The signal global carries both facts in one double: its **sign** is the direction
+(positive bullish, negative bearish) and its **magnitude** is the signal bar time,
+which is what lets the relay tell a new flip from one it has already sent. The relay
+writes a matching `HT_ACK_*` only after Telegram accepts the message, so a dropped
+connection retries on the next poll instead of losing the signal.
+
+**Message content.** Each alert carries live market context for the signal - read for the
+**signal's** symbol and timeframe, never the relay chart's:
+
+```
+<b>BULLISH reversal</b>
+XRPUSD M5
+Bar: 2026.09.01 15:45
+
+Now      2.94480          <- current bid
+Signal   2.94512          <- close of the bar that flipped
+Moved    -3.2 pts (-0.11 ATR)   <- drift since the signal
+Spread   1.2 pts          <- is it still tradable
+ATR(14)  0.00291          <- volatility on that timeframe
+Day      +0.84%           <- change from the daily open
+Range    2.93100 - 2.98120
+At       28% of range     <- where price sits in the day
+
+Long     1.50 @ 2.94100   <- your exposure on THIS symbol
+P/L      +12.40 USD
+WARNING  bearish signal AGAINST your open LONG
+Account  3 open, floating +45.20 USD
+```
+
+The last block is the point of the whole message. A reversal firing **against** a position
+you are already holding is the one case that needs looking at immediately, so it is called
+out in words rather than left for you to work out from the numbers. When the signal and the
+position point the same way it says `agrees` instead, and with nothing open it says
+`no open <symbol>`.
+
+Both sides are aggregated separately, so hedging accounts with a long and a short on the same
+symbol report both and the conflict test uses the net.
+
+Every line is optional and independently guarded. A symbol not in Market Watch, or one whose
+history has not downloaded, simply drops the lines it cannot fill - market data must never
+be able to fail an alert. ATR is computed from raw rates rather than an `iATR` handle,
+because a handle created on the spot has not calculated yet and `CopyBuffer` would return
+nothing.
+
+**Scope.** All five indicators publish, through the shared `HullTrendRelay.mqh`:
+
+| Kind | Indicator | Event that fires | Direction |
+|---|---|---|---|
+| `TREND` | `HullTrend_MT5` | Colour flip on the signal bar | bullish / bearish reversal |
+| `SR` | `HullTrendSR_MT5` | Last closed bar closed **through** a level the bar before closed on the other side of | break up / break down |
+| `LG` | `HullTrendLG_MT5` | A newly confirmed liquidity grab | sell-side / buy-side swept |
+| `BO` | `HullTrendBO_MT5` | Range breakout confirmation (the existing `FireAlert`) | upside / downside |
+| `FVG` | `HullTrendFVG_MT5` | Setup trigger from a zone (the existing `FireAlert`) | long / short |
+
+Slot names are `HT_SIG_<KIND>_<SYMBOL>_<TF>`. The kind never contains `_` and neither does
+the timeframe, but a **symbol may**, so the relay takes the kind from the first separator and
+the timeframe from the last, leaving the middle as the symbol.
+
+`SR` needed a new detector: the indicator has no notion of an event - `SRLevel` is a static
+cluster with a touch count - so a **confirmed break** is defined in the indicator itself. A
+touch would fire on nearly every bar and bury everything else. Only levels at or above
+`InpMinTouches` count, and if several give way on one bar the strongest is reported.
+
+`LG` publishing is deliberately **not** gated on `InpPrint`: that input controls the Experts
+log, and an alert channel must not switch off as a side effect of quietening a log.
+
+None of this added an input to any indicator, so the `iCustom` contract is untouched at 27.
+
+**Setup**
+
+| Step | What |
+|---|---|
+| 1 | Create `MQL5\Files\telegram.ini` with `token=` and `chat_id=` lines. Copy `telegram.ini.example` as a starting point |
+| 2 | Add `https://api.telegram.org` to **Tools > Options > Expert Advisors > Allow WebRequest for listed URL** |
+| 3 | Attach `HullTrendTelegramRelay` to **one** chart, with Algo Trading enabled. MT5 restores it after a restart, so this is a one-time step |
+| 4 | Optional: drag `TelegramSelfTest` onto any chart first. It checks the config, sends one message, and names the exact failure if it cannot |
+
+One relay instance serves every chart, because it scans all `HT_SIG_*` globals rather
+than watching its own symbol. **Attaching it to several charts is harmless** - instances
+elect a single sender through the `HT_RELAY_LOCK` global variable and the rest sit
+passive, taking over automatically if the owning chart is closed. Only the owner sends,
+so no message is ever duplicated.
+
+The `relay online` message is **off by default** (`InpSendStartup`) and throttled by
+`InpHelloCooldown` when enabled. MT5 re-runs `OnInit` every time a chart is edited, and
+an unthrottled announcement on every re-init across every chart floods the chat.
+
+The token lives in a runtime file rather than an input or a `#define` on purpose: it
+never enters a compiled `.ex5`, never reaches the git repo, and can be rotated without
+recompiling. Keep the real `telegram.ini` out of version control.
+
+On attach the relay seeds its acknowledgements from whatever signals are already
+standing, so it does not replay a flip that may be days old. Set `InpSendOnAttach = true`
+if you would rather it forward the current state immediately.
 
 ---
 
@@ -328,6 +450,18 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 | EA never trades | Read the `SUM` line: the `vetoes:` histogram names the rejecting filter (e.g. `htf-disagrees=142 spread=8`). |
 | EA trades differ from chart arrows | The EA reads the colour buffer, not arrows, at shift 1 — check `InpHTFShift` and that you are not reading the forming bar. |
 | `sizing preflight: … rounds to ZERO lots` | Risk % is below the minimum-lot floor on this symbol. The log says the exact % needed. |
+| Telegram: nothing arrives, no Telegram lines in the log at all | The relay EA is not attached. The indicator publishes, but only the EA sends. Check the Experts tab for `Relay: online`. |
+| Telegram: `token is malformed ... contain a colon` | Only half the token was pasted. A token is `<bot_id>:<secret>` - the numeric id in front of the colon is part of it, not the chat_id. |
+| Telegram: `chat_id is this BOT'S OWN id` | The token was split across the two keys. `chat_id` must be the person or group being messaged, which is a different number entirely. |
+| Telegram: `WebRequest is not permitted here` / error 4014 | Either you called it from an indicator (impossible by design - use the relay EA) or Algo Trading is off. |
+| Telegram: error 5203 or HTTP status -1 | `https://api.telegram.org` is not in the WebRequest whitelist. Tools > Options > Expert Advisors. |
+| Telegram: `HTTP 401` | The bot token is wrong or was revoked by BotFather. |
+| Telegram: `HTTP 400 - chat not found` | Wrong `chat_id`, or the bot was never added to that chat. Send the bot a message first, then re-read `getUpdates`. |
+| Relay online but silent | No reversal has fired since it started. It only forwards new flips, and on attach it seeds from standing signals rather than replaying them. |
+| Alerts stopped after removing and re-adding the EA | Fixed in relay 1.50. Before it, re-attaching re-seeded every acknowledgement and swallowed anything not yet sent. |
+| Every chart logs `this chart is the sending instance` | The broken shared lock, fixed in relay 1.50. All instances elected themselves, so each reversal was sent once per chart. |
+| Repeated `relay online` messages | Fixed in relay 1.20: instances now elect one sender and the announcement is off by default and throttled. Recompile and re-attach if you are on an older build. |
+| Every Telegram message arrives twice | Two relay instances from before 1.20, or two terminals sharing one bot. From 1.20 the `HT_RELAY_LOCK` election prevents this within a terminal. |
 | No liquidity-grab markers at all | `InpMinSweepATR` is too high for the symbol, or `InpMaxAgeBars` is shorter than the visible chart. Both effective values are on the `Hull Liquidity Grab config:` line printed at attach. |
 | Fewer grab markers than the log lists | `InpMaxPoints` caps what is **drawn** (default 8), never what is found. The `HullLG \| LIST` line reports the true totals. |
 | Grab markers all sit on one side | Expected in a one-way trend. The log does not: `InpPrintPerSide` caps each direction independently, so both sides always appear in the list. |
@@ -349,7 +483,7 @@ The subject and message include the symbol and a readable timeframe name (`PERIO
 | Change | Also update |
 |---|---|
 | A whipsaw default | The profile table in `HullTrend_EA_Documentation.md` §18 (the EA forwards `InpSlopeATRMul`) |
-| Indicator input order | The **24**-argument `iCustom` call in `HullTrendEA_Core.mqh`'s `CreateHullHandle()` — group placeholders included — **and** `HULL_ICUSTOM_ARGS`, which the EA asserts against the live handle at `OnInit` |
+| Indicator input order | The **27**-argument `iCustom` call in `HullTrendEA_Core.mqh`'s `CreateHullHandle()` — group placeholders included — **and** `HULL_ICUSTOM_ARGS`, which the EA asserts against the live handle at `OnInit` |
 | Buffer order | The buffer contract in §9 **and** the EA's `ReadSignal()` buffer indices |
 | Anything in the state machine | The streak/flip explanation in §4–§5 and the EA's flip-detection (`col[1] != col[0]`) |
 | A new per-bar log line | The log format table in `HullTrend_EA_Documentation.md` §15 |
@@ -782,6 +916,50 @@ found in the last 300 H1 bars, all three re-derived from their own range bars.
 - `HullTrendSR_MT5.mq5` draws the support/resistance levels the EA trades against.
 - The engine moved to `HullTrendSR.mqh` (`MQL5\Include\`) and is **shared** with the EA, so the picture cannot drift from the trades. The higher-timeframe ladder moved with it, because both consumers must resolve the same HTF or they scan different data.
 - Deliberately a separate indicator: folding it into `HullTrend_MT5` would extend that indicator's positional `iCustom` list — the most fragile contract in the system — to publish data the EA does not want, since the EA computes its own levels in-process.
+
+### Relay 1.60 / indicator 2.70
+- **Added:** all five indicators now publish. `HullTrendRelay.mqh` is the shared publish half, so the five cannot drift apart, and slot names carry a KIND so they no longer collide on the same symbol and timeframe.
+- **Added:** a confirmed-break detector in `HullTrendSR_MT5` - the only one of the four that had no event to hook.
+- **Added:** `EventLabel()` in the relay, so a message says what actually happened (`Resistance BREAK up`, `BEARISH liquidity grab`, `UPSIDE breakout`, `LONG setup (FVG)`) instead of calling everything a reversal.
+- Slots from before this change cannot be parsed, so the relay discards them once, with a log line, rather than sending a message with no context.
+
+### Relay 1.50
+- **Fixed:** every instance elected itself as sender. Ownership used ONE shared `HT_RELAY_LOCK` with no identity in it, and `OnDeinit` deleted that lock whenever the instance believed it was the owner - so removing the EA from one chart released the lock a different chart was holding, and the next instance found none and claimed it. Replaced with a per-chart heartbeat (`HT_RELAY_OWN_<chartid>`); the owner is simply the lowest chart id still beating, so nothing is claimed, nothing races, and an instance can only delete its own name.
+- **Fixed:** re-attaching the EA silently swallowed pending alerts. `SeedAcks()` re-stamped **every** slot on every attach, acknowledging reversals that had not been sent yet. It now seeds only slots with no acknowledgement at all, so a first-ever run still does not replay history but a re-attach no longer eats a signal.
+- Ownership is now re-evaluated every tick rather than only at attach, so a role change is picked up within one poll.
+
+### Relay 1.40
+- **Added:** open-position context. Each alert reports your exposure on the signal symbol - volume, volume-weighted entry, floating P/L - plus an account line with the total open count and floating P/L.
+- **Added:** the conflict test. A reversal against an open position is called out as `WARNING ... AGAINST your open LONG/SHORT`; a matching one says `agrees`. This is the reason the block is in the message at all.
+- Long and short volumes are aggregated separately so hedging accounts are handled correctly, and the conflict test uses the net exposure. `PositionGetTicket` selects each position before the getters are read.
+- Entry prices fall back to the symbol digits, then to 5, when the market snapshot could not resolve the symbol - otherwise they would print as integers.
+
+### Relay 1.30
+- **Added:** live market context in every alert - current bid, the signal bar close, drift since the signal in points and ATR, spread, ATR(14), daily change, daily range and position within it.
+- All of it is read for the **signal's** symbol and timeframe, not the relay chart's, since one relay serves every chart. Each block is individually guarded so missing data degrades the message instead of losing the alert.
+- **Added:** `TgHtmlEscape()`. The body is sent with `parse_mode=HTML`, so a bare `&` or `<` in a symbol or broker name would return HTTP 400 and silently drop the alert.
+
+### Relay 1.20
+- **Fixed:** the relay announced itself once per instance per re-init. Attached to four charts and edited a few times, that put a dozen `relay online` messages in the chat. Instances now elect a single sender via the `HT_RELAY_LOCK` global heartbeat; the rest stay passive and take over only if the owner disappears.
+- **Changed:** `InpSendStartup` now defaults to **off**, and when on is throttled by `InpHelloCooldown` (default 900 s) using a shared global, so chart edits cannot re-announce.
+- **Fixed:** only the owning instance polls, which also closes the race where two instances could both send the same reversal before either wrote the acknowledgement.
+- The lock is released on `OnDeinit` (except on recompile) so a passive instance takes over immediately rather than waiting for the heartbeat to go stale.
+
+### Indicator 2.60
+- **Changed:** Telegram delivery is now **permanent, not optional**. The `InpTelegramRelay` input is gone and the indicator publishes every reversal unconditionally; an input that can be left off is just a way to miss alerts silently. Delivery is controlled by attaching the relay EA.
+- **Added:** `TelegramSelfTest.mq5` - a script that validates the config and sends one test message, naming the exact failure stage.
+- **Hardened:** the token is now shape-checked (`<bot_id>:<secret>`) and a `chat_id` equal to the bot own id is rejected by name. Both are what happens when a token is split across the two keys, and both otherwise surface only as an opaque HTTP 401 or 400.
+- **Fixed:** the relay no longer returns `INIT_FAILED` on a bad config, which detached it from the chart and forced a re-attach after every typo. It now stays resident and re-reads the config every minute.
+- `iCustom` argument count 28 -> **27** (the 2.50 input was removed again).
+
+### Indicator 2.50
+- **Added:** Telegram delivery for reversals, via `InpTelegramRelay` + the new `HullTrendTelegramRelay` EA and `Telegram.mqh`. Split across two components because `WebRequest()` is prohibited in indicators; the indicator publishes a global variable and the EA forwards it (§10.1).
+- **Added:** `MQL5\Files\telegram.ini` as the credential store - read at runtime, so the token never lands in an `.ex5` or the repo.
+- `iCustom` argument count 27 -> **28**. The new input is appended **last**, so no existing argument slot moved.
+
+### Indicator 2.40
+- **Added:** direction-specific alerts. Bullish and bearish reversals each have their own pop-up toggle and sound file — `InpEnableAlertBull` / `InpSoundFileBull` vs `InpEnableAlertBear` / `InpSoundFileBear` — so a long signal and a short signal can no longer be confused by ear. Push and email stay single master switches. The old `InpEnableSound` / `InpSoundFile` are gone. `iCustom` argument count 24 → **27**.
+- **Migration:** the removed inputs are dropped silently from saved templates and `.set` files - MT5 discards parameters it no longer recognises without warning. The new defaults match the old ones (alerts on, sound off), so a default setup is unaffected, but anyone who had `InpEnableSound = true` loses the sound until they set `InpEnableSoundBull` / `InpEnableSoundBear` again.
 
 ### Indicator 2.30
 - **Fixed:** the state machine no longer fabricates a flip at the warm-up boundary. The seed is taken from the first real slope instead of a hard-coded "up", and colouring starts one bar later (§5).

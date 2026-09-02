@@ -74,6 +74,7 @@
 #property indicator_buffers 0
 #property indicator_plots   0
 
+#include "HullTrendRelay.mqh"
 #include <HullTrendBO.mqh>
 
 //+------------------------------------------------------------------+
@@ -214,6 +215,9 @@ void FireAlert(const BOPoint &p, const double atr)
    //--- Always on the record, whatever the channels are set to. An alert that
    //--- fired at 3am and was dismissed leaves no trace anywhere else.
    Print("HullBO | ALERT | " + msg);
+
+   //--- Telegram, via the relay EA: WebRequest is illegal here
+   HTRelayPublish(HT_KIND_BO, p.dir > 0, p.time, g_tf);
   }
 
 //+------------------------------------------------------------------+

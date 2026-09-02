@@ -128,7 +128,7 @@
 //--- Number of arguments CreateHullHandle() must pass to iCustom: every input
 //--- HullTrend_MT5 declares PLUS one slot per `input group`. Asserted against
 //--- the live handle at OnInit, because getting it wrong is silent.
-#define HULL_ICUSTOM_ARGS 24
+#define HULL_ICUSTOM_ARGS 27
 
 //--- must mirror HullTrend_MT5.mq5 (same order, same values)
 enum ENUM_SLOPE_FILTER_EA
@@ -493,8 +493,8 @@ bool UsableValue(const double v)
 //| slot of its own - verified against this build's Experts log, where |
 //| an EA-created handle reports the profile's atrMul while a hand-    |
 //| attached copy of the same indicator reports its own default.       |
-//| HullTrend_MT5 declares 20 parameters spread over 4 groups, so this |
-//| call must pass 24 arguments with a placeholder at every group      |
+//| HullTrend_MT5 declares 23 parameters spread over 4 groups, so this |
+//| call must pass 27 arguments with a placeholder at every group      |
 //| position. Getting it wrong fails SILENTLY: the values shift one    |
 //| slot left and the indicator simply runs with the wrong settings.   |
 //| CheckHullHandle() below cross-checks the count at startup.         |
@@ -522,12 +522,15 @@ int CreateHullHandle(const ENUM_TIMEFRAMES tf)
                                          //    handle it does not need
                   0,                     // 17 group "Alerts"
                   0,                     // 18 signal bar    - closed bar
-                  false,                 // 19 pop-up alerts - the EA logs instead
-                  false,                 // 20 sound
-                  "",                    // 21 sound file
-                  false,                 // 22 push
-                  false,                 // 23 email
-                  false                  // 24 alert on attach
+                  false,                 // 19 pop-up alerts, bullish - the EA logs instead
+                  false,                 // 20 pop-up alerts, bearish
+                  false,                 // 21 sound, bullish
+                  "",                    // 22 sound file, bullish
+                  false,                 // 23 sound, bearish
+                  "",                    // 24 sound file, bearish
+                  false,                 // 25 push
+                  false,                 // 26 email
+                  false                  // 27 alert on attach
                  );
   }
 

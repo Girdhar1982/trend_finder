@@ -31,6 +31,7 @@
 #property indicator_buffers 0
 #property indicator_plots   0
 
+#include "HullTrendRelay.mqh"
 #include <HullTrendSR.mqh>
 
 //+------------------------------------------------------------------+
@@ -75,6 +76,7 @@ input color            InpPanelBg     = C'22,26,34';    // Panel backing plate (
 
 //--- state
 SRLevel  g_sr[];
+datetime g_lastBreak = 0;   // closed bar already published to the relay
 int      g_hATR    = INVALID_HANDLE;
 datetime g_lastBar  = 0;
 datetime g_lastDraw = 0;
@@ -110,6 +112,7 @@ int OnInit()
    g_lastBar  = 0;
    g_lastDraw = 0;
    ArrayResize(g_sr, 0);
+   g_lastBreak = 0;
    return INIT_SUCCEEDED;
   }
 
@@ -177,6 +180,51 @@ int OnCalculate(const int rates_total,
          return(prev_calculated);
 
       g_lastBar = bar;
+
+      //--- A CONFIRMED BREAK, published for the Telegram relay.
+      //---
+      //--- This indicator has no notion of an event - SRLevel is a static
+      //--- cluster with a touch count - so the event is defined here: the
+      //--- last closed bar closed through a level the bar before it closed
+      //--- on the other side of. A touch would fire on almost every bar and
+      //--- bury everything else, so only a close-through counts.
+      if(rates_total >= 3)
+        {
+         const double prior = close[rates_total - 3];
+         const double now   = close[rates_total - 2];
+         const int    minT   = (InpMinTouches < 1 ? 1 : InpMinTouches);
+
+         //--- if several levels gave way on one bar, report the strongest
+         int    bestTouches = 0;
+         bool   bestUp      = false;
+         bool   found       = false;
+
+         for(int i = 0; i < ArraySize(g_sr); i++)
+           {
+            if(g_sr[i].touches < minT)
+               continue;
+
+            const double lvl = g_sr[i].price;
+            const bool   up   = (prior <= lvl && now > lvl);
+            const bool   down = (prior >= lvl && now < lvl);
+            if(!up && !down)
+               continue;
+
+            if(g_sr[i].touches > bestTouches)
+              {
+               bestTouches = g_sr[i].touches;
+               bestUp      = up;
+               found       = true;
+              }
+           }
+
+         const datetime brokeAt = time[rates_total - 2];
+         if(found && brokeAt > g_lastBreak)
+           {
+            HTRelayPublish(HT_KIND_SR, bestUp, brokeAt, (ENUM_TIMEFRAMES)_Period);
+            g_lastBreak = brokeAt;
+           }
+        }
      }
 
    //--- Which levels count as "nearest", which side of price they sit on, and

@@ -25,6 +25,7 @@
 #property indicator_buffers 0
 #property indicator_plots   0
 
+#include "HullTrendRelay.mqh"
 #include <HullTrendLG.mqh>
 
 //+------------------------------------------------------------------+
@@ -54,6 +55,7 @@ LGPoint  g_lg[];
 int      g_hATR      = INVALID_HANDLE;
 datetime g_lastBar   = 0;
 datetime g_lastPrinted = 0;   // newest grab time already reported to the log
+datetime g_lastRelayed = 0;   // newest grab already sent to the Telegram relay
 string   g_prefix    = "HullLGv_";   // "v" for viewer - must NOT collide with
                                      // anything else on the same chart
 
@@ -104,6 +106,7 @@ int OnInit()
 
    g_lastBar   = 0;
    g_lastPrinted = 0;
+   g_lastRelayed = 0;
    ArrayResize(g_lg, 0);
    return INIT_SUCCEEDED;
   }
@@ -172,6 +175,19 @@ int OnCalculate(const int rates_total,
      {
       LGPrintRecent(g_lg, InpPrintPerSide, _Symbol, (ENUM_TIMEFRAMES)_Period, atr[0]);
       g_lastPrinted = g_lg[0].time;
+     }
+
+   //--- Telegram, via the relay EA. Deliberately NOT gated on InpPrint:
+   //--- that input controls the Experts log only, and an alert channel
+   //--- must not be switched off as a side effect of quietening a log.
+   if(ArraySize(g_lg) > 0 && g_lg[0].time > g_lastRelayed)
+     {
+      //--- the first pass only arms the marker - publishing whatever grab
+      //--- happens to be standing at attach would fire a stale alert
+      if(g_lastRelayed > 0)
+         HTRelayPublish(HT_KIND_LG, g_lg[0].dir > 0, g_lg[0].time,
+                        (ENUM_TIMEFRAMES)_Period);
+      g_lastRelayed = g_lg[0].time;
      }
 
    LGStyle st;

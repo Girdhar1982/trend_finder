@@ -1,0 +1,5 @@
+# Telegram bot credentials - runtime config, never source.
+# telegram.ini.example is the tracked template; the real file holds a
+# live bot token and must stay out of version control.
+telegram.ini
+**/telegram.ini

@@ -1,17 +1,19 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                                 HullTrend_MT5.mq5|
 //|                                  Copyright 2026, Trading Systems |
 //|                                             https://trading.com  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Trading Systems"
 #property link      "https://trading.com"
-#property version   "2.30"
+#property version   "2.70"
 #property description "Hull Moving Average trend filter."
 #property description "Colour-coded slope, reversal arrows and configurable alerts."
 #property description "Whipsaw control: volatility-scaled slope threshold + N-bar"
 #property description "confirmation inside a bounded confirmation window."
 
 //--- show indicator in the main chart window
+#include "HullTrendRelay.mqh"
+
 #property indicator_chart_window
 #property indicator_buffers 8
 #property indicator_plots   3
@@ -61,7 +63,7 @@ enum ENUM_SLOPE_FILTER
 //--- removing or reordering ANYTHING below - groups included - changes the
 //--- argument list every iCustom caller must pass. HullTrendEA_Core.mqh
 //--- mirrors this list in CreateHullHandle() and asserts the count at OnInit.
-//--- Current count: 24 (20 inputs + 4 groups).
+//--- Current count: 27 (23 inputs + 4 groups).
 input group                             "Hull Moving Average"
 input int                InpHMAPeriod     = 20;             // Hull period
 input ENUM_APPLIED_PRICE InpHMAPrice      = PRICE_CLOSE;    // Applied price
@@ -80,9 +82,12 @@ input int                InpArrowOffset   = 10;             // Arrow distance fr
 input double             InpArrowOffATR   = 0.25;           // Arrow distance from bar (x ATR, 0 = points only)
 input group                             "Alerts"
 input ENUM_SIGNAL_BAR    InpSignalBar     = SIGNAL_CLOSED_BAR; // Signal bar
-input bool               InpEnableAlert   = true;           // Enable pop-up alerts
-input bool               InpEnableSound   = false;          // Enable sound alerts
-input string             InpSoundFile     = "alert.wav";    // Sound file
+input bool               InpEnableAlertBull = true;            // Pop-up alerts on BULLISH reversals
+input bool               InpEnableAlertBear = true;            // Pop-up alerts on BEARISH reversals
+input bool               InpEnableSoundBull = false;           // Sound on BULLISH reversals
+input string             InpSoundFileBull   = "alert.wav";     // Bullish sound file
+input bool               InpEnableSoundBear = false;           // Sound on BEARISH reversals
+input string             InpSoundFileBear   = "alert2.wav";    // Bearish sound file
 input bool               InpEnablePush    = false;          // Enable mobile push notifications
 input bool               InpEnableEmail   = false;          // Enable email alerts
 input bool               InpAlertOnAttach = false;          // Also alert if the attach bar already carries a reversal
@@ -543,7 +548,7 @@ int OnCalculate(const int rates_total,
          if(up || down)
            {
             g_lastSignalTime = time[idx];
-            TriggerAlert(up ? "BULLISH reversal" : "BEARISH reversal", time[idx]);
+            TriggerAlert(up ? "BULLISH reversal" : "BEARISH reversal", up, time[idx]);
            }
         }
 
@@ -583,7 +588,7 @@ double AppliedPrice(const double &open[], const double &high[], const double &lo
 //+------------------------------------------------------------------+
 //| Fire the enabled alert channels                                  |
 //+------------------------------------------------------------------+
-void TriggerAlert(const string trendMsg, const datetime barTime)
+void TriggerAlert(const string trendMsg, const bool bullish, const datetime barTime)
   {
    string tf      = PeriodToString(_Period);
    string subject = "Hull Trend Alert - " + _Symbol + " [" + tf + "]";
@@ -591,14 +596,30 @@ void TriggerAlert(const string trendMsg, const datetime barTime)
                                  g_period, trendMsg, _Symbol, tf,
                                  TimeToString(barTime, TIME_DATE | TIME_MINUTES));
 
-   if(InpEnableAlert)
+   const bool     popAlert = bullish ? InpEnableAlertBull : InpEnableAlertBear;
+   const bool     popSound = bullish ? InpEnableSoundBull : InpEnableSoundBear;
+   const string   file     = bullish ? InpSoundFileBull   : InpSoundFileBear;
+
+   if(popAlert)
       Alert(message);
-   if(InpEnableSound && InpSoundFile != "")
-      PlaySound(InpSoundFile);
+   if(popSound && file != "")
+      PlaySound(file);
    if(InpEnablePush)
       SendNotification(message);
    if(InpEnableEmail)
       SendMail(subject, message);
+
+   //--- Telegram cannot be sent from here: WebRequest() is prohibited in
+   //--- indicators by the terminal, in every build. So publish the signal
+   //--- and let HullTrendTelegramRelay.mq5 (an EA, where WebRequest is
+   //--- legal) pick it up. Sign carries the direction; magnitude is the
+   //--- signal bar time, so the relay can tell a new flip from a repeat.
+   //---
+   //--- Unconditional on purpose: Telegram delivery is not an opt-in. A
+   //--- GlobalVariableSet is nearly free and inert if no relay is running,
+   //--- so there is nothing to gain by gating it behind an input that can
+   //--- silently be left off - which is exactly how alerts get missed.
+   HTRelayPublish(HT_KIND_TREND, bullish, barTime, (ENUM_TIMEFRAMES)_Period);
   }
 
 //+------------------------------------------------------------------+

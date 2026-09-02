@@ -1,0 +1,33 @@
+# HullTrend Telegram credentials
+#
+# Copy this file to your terminal's data folder as:
+#     MQL5\Files\telegram.ini
+# and fill in the two values below.
+#
+# This file is READ AT RUNTIME and is never compiled into an .ex5.
+# Keep the real telegram.ini out of git - it is a credential.
+#
+# --- how to get the two values -------------------------------------
+# token    : message @BotFather on Telegram, /newbot, copy the token
+#            WHOLE. It has TWO halves joined by a colon:
+#                <bot_id>:<secret>
+#            e.g. 123456789:AAF-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#            The numeric half in front of the colon is PART OF THE
+#            TOKEN. It is NOT the chat_id - it is the bot's own id,
+#            and a bot cannot message itself. Splitting the token
+#            across the two keys breaks both of them at once.
+# chat_id  : add the bot to the target chat, send it any message, then
+#            open in a browser:
+#              https://api.telegram.org/bot<TOKEN>/getUpdates
+#            and read result[0].message.chat.id
+#            Personal chats are positive, groups/channels negative
+#            (e.g. -1001234567890).
+# -------------------------------------------------------------------
+#
+# One more step, outside this file: whitelist the API host in
+#     Tools > Options > Expert Advisors > Allow WebRequest for listed URL
+# add:  https://api.telegram.org
+# Without it every send fails with error 5203 / status -1.
+
+token   = PASTE_YOUR_BOT_TOKEN_HERE
+chat_id = PASTE_YOUR_CHAT_ID_HERE
