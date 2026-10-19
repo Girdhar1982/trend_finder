@@ -1,0 +1,384 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chart Indicators &amp; Economic Events Guide</title><style>body{font-family:Segoe UI,Arial,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1f2933;background:#fdf8f3}
+h1{border-bottom:3px solid #8b0000;padding-bottom:.3rem}h2{margin-top:2.2rem;color:#8b0000}h3{color:#243b53}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.95rem}th,td{border:1px solid #d9cfc4;padding:.5rem .7rem;text-align:left;vertical-align:top}
+th{background:#f0e4d8}tr:nth-child(even) td{background:#faf3ec}code{background:#efe6dc;padding:.1rem .35rem;border-radius:3px;font-family:Consolas,monospace}
+hr{border:0;border-top:1px solid #d9cfc4;margin:2rem 0}
+.badge{display:inline-block;padding:.05rem .5rem;border-radius:10px;font-size:.75rem;font-weight:700;color:#fff}
+.badge.High{background:#c62828}.badge.Med{background:#ef6c00}.badge.Low{background:#f9a825;color:#3b2f00}
+.up{color:#1b7f3b;font-weight:600}.dn{color:#c62828;font-weight:600}
+.c-green{color:#006400;font-weight:600}.c-gray{color:#696969;font-weight:600}.c-dred{color:#8b0000;font-weight:600}.c-blue{color:#0000cd}
+.legend{background:#fff;border:1px solid #d9cfc4;border-left:5px solid #8b0000;padding:.7rem 1rem;margin:1rem 0;line-height:2}</style></head><body><h1>Chart Indicators &amp; Economic Events Guide</h1><div class="legend"><b>Colour key</b><br>
+<span class="badge High">HIGH</span> <span class="badge Med">MEDIUM</span> <span class="badge Low">LOW</span> news impact &nbsp;|&nbsp;
+<span class="up">green text</span> = pushes USDJPY up &nbsp;
+<span class="dn">red text</span> = pushes USDJPY down &nbsp;|&nbsp;
+Indicator text: <span class="c-green">dark green = open / profit</span>, <span class="c-gray">gray = closed</span>,
+<span class="c-dred">dark red = loss / opening or closing soon</span>, <span class="c-blue">blue = under 5 min left (countdown)</span></div>
+<p>Plain-English guide to the four on-chart indicators and to the main news events that move USDJPY.
+Nothing here is trade advice.</p>
+<hr />
+<h2>Part 1 – Your chart indicators</h2>
+<p>All four draw text at the top-right of the chart and update every second. They don't draw lines or
+arrows and don't place trades.</p>
+<table>
+<thead>
+<tr>
+<th>Indicator</th>
+<th>What it shows</th>
+<th>Folder</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HTF_Countdown</td>
+<td>Time left until the current H1, H4 and D1 candles close</td>
+<td><code>HTF_Countdown</code></td>
+</tr>
+<tr>
+<td>Session_Clock</td>
+<td>Which trading sessions are open, how long they have been open, when they end</td>
+<td><code>Session_Clock</code></td>
+</tr>
+<tr>
+<td>Open_Positions</td>
+<td>How many positions you have open, with profit/loss</td>
+<td><code>Open_Positions</code></td>
+</tr>
+</tbody>
+</table>
+<h3>Installing / reloading</h3>
+<ol>
+<li>Files live in <code>MQL5\Indicators\&lt;name&gt;</code> inside the MT5 data folder (File → Open Data Folder).</li>
+<li>Navigator (Ctrl+N) → right-click <strong>Indicators</strong> → <strong>Refresh</strong>, then drag the indicator onto the chart.</li>
+<li>After any update, remove the old copy first (Ctrl+I → select it → Delete), then drag it on again.</li>
+</ol>
+<h3>HTF_Countdown</h3>
+<p>Example: <code>H1 29:13   H4 02:29:13   D1 14:29:13</code></p>
+<ul>
+<li>Each value is the time until that candle closes. Use it to wait for a candle close before acting.</li>
+<li>The text turns <strong class="c-blue">blue</strong> when 5 minutes or fewer are left (input "Warn when this many minutes or fewer are left").</li>
+<li>Times come from the broker's server clock.</li>
+</ul>
+<h3>Session_Clock</h3>
+<p>Example (open): <code>London   OPEN   +02:10:05  ends in 06:49:55</code>
+Example (closed): <code>Tokyo    closed opens in 05:10:00</code></p>
+<ul>
+<li><code>+02:10:05</code> is how long the session has been open. <code>ends in</code> is the time left.</li>
+<li><span class="c-green">Green = open</span>, <span class="c-gray">gray = closed</span>, <span class="c-dred">dark red = opens or closes within 15 minutes</span>.</li>
+<li><strong>Forex mode</strong> (Sydney, Tokyo, London, New York): shows "Forex market closed (weekend)" from Friday
+  21:00 UTC to Sunday 21:00 UTC.</li>
+<li><strong>Crypto mode</strong> (Asia, Europe, US): runs 24/7.</li>
+<li>"Market" input: Auto picks crypto if the symbol's broker path contains "crypto". Otherwise set it by hand.</li>
+<li>Session hours are inputs in <strong>UTC</strong>. Defaults:</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Session</th>
+<th>UTC hours</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sydney</td>
+<td>21:00–06:00</td>
+</tr>
+<tr>
+<td>Tokyo</td>
+<td>00:00–09:00</td>
+</tr>
+<tr>
+<td>London</td>
+<td>07:00–16:00</td>
+</tr>
+<tr>
+<td>New York</td>
+<td>12:00–21:00</td>
+</tr>
+<tr>
+<td>Asia (crypto)</td>
+<td>00:00–08:00</td>
+</tr>
+<tr>
+<td>Europe (crypto)</td>
+<td>07:00–16:00</td>
+</tr>
+<tr>
+<td>US (crypto)</td>
+<td>13:00–22:00</td>
+</tr>
+</tbody>
+</table>
+<p>London and New York shift by one hour when daylight saving changes. Update the inputs then.
+The crypto hours are a convention only.</p>
+<h3>Open_Positions</h3>
+<p>Example header: <code>Open positions: 3  P/L +12.40 USD</code>
+Example line: <code>USDJPY BUY  0.10 @ 158.123  +8.20</code></p>
+<ul>
+<li>Count header on or off, and the position list on or off, are separate inputs.</li>
+<li>"Max position lines" sets how many lines show (default 10). The rest show as "... +N more".</li>
+<li>"Count positions on" is either all symbols or only the chart's symbol.</li>
+<li>P/L is profit plus swap. It does not include commission.</li>
+<li><span class="c-green">Green = in profit</span>, <span class="c-dred">dark red = in loss</span>.</li>
+</ul>
+<hr />
+<h2>Part 2 – Where to find the economic calendar</h2>
+<ul>
+<li><strong>MT5:</strong> Ctrl+T → <strong>Calendar</strong> tab → right-click → Filter → Country: United States, Importance: Medium/High.</li>
+<li><strong>Web:</strong> <a href="https://www.forexfactory.com/calendar">Forex Factory</a>,
+  <a href="https://www.investing.com/economic-calendar/">Investing.com</a>,
+  <a href="https://www.fxstreet.com/economic-calendar">FXStreet</a>.</li>
+<li>Every event shows a <strong>Forecast</strong> (what economists expect), a <strong>Previous</strong> value and the <strong>Actual</strong>
+  result. Price moves on the <em>surprise</em> (Actual vs Forecast), not on the number itself.</li>
+</ul>
+<hr />
+<h2>Part 3 – Main events and what they mean</h2>
+<p><strong>Rule of thumb for USDJPY:</strong> <span class="up">USDJPY rises</span> when US rates or US yields rise or Japan stays loose, and
+falls when US data disappoints or the Bank of Japan tightens. Spreads widen and price can jump at the
+release time, so many traders stay out around high-impact events.</p>
+<h3>United States (moves the dollar)</h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>What it is</th>
+<th>How often</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FOMC rate decision</strong> <span class="badge High">HIGH</span></td>
+<td>The Federal Reserve sets the US interest rate, followed by a press conference.</td>
+<td>8 times a year</td>
+<td>Biggest mover. Higher or hawkish (rate-rise-friendly) means <span class="up">dollar up</span>. Lower or dovish (rate-cut-friendly) means <span class="dn">dollar down</span>.</td>
+</tr>
+<tr>
+<td><strong>Fed chair speech / FOMC minutes</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Hints about future rate moves.</td>
+<td>Irregular / ~3 weeks after FOMC</td>
+<td>Can shift rate-cut expectations.</td>
+</tr>
+<tr>
+<td><strong>NFP (Non-Farm Payrolls)</strong> <span class="badge High">HIGH</span></td>
+<td>Number of jobs added in the US, excluding farms.</td>
+<td>Usually the first Friday of the month</td>
+<td>Strong jobs means the <span class="up">dollar goes up</span>, since the Fed may keep rates high. Weak jobs means the <span class="dn">dollar goes down</span>. Very volatile.</td>
+</tr>
+<tr>
+<td><strong>Unemployment rate</strong> <span class="badge Med">MEDIUM</span></td>
+<td>% of people without jobs (released with NFP).</td>
+<td>Monthly</td>
+<td>Higher unemployment is weaker for the dollar.</td>
+</tr>
+<tr>
+<td><strong>CPI (Consumer Price Index)</strong> <span class="badge High">HIGH</span></td>
+<td>How fast consumer prices rise (inflation).</td>
+<td>Monthly</td>
+<td>Higher than forecast means the Fed may raise or hold rates, <span class="up">so the <span class="up">dollar goes up</span></span>. Lower than forecast means the <span class="dn">dollar goes down</span>.</td>
+</tr>
+<tr>
+<td><strong>PCE price index</strong> <span class="badge Med">MEDIUM</span></td>
+<td>The Fed's favoured inflation measure.</td>
+<td>Monthly</td>
+<td>Same logic as CPI.</td>
+</tr>
+<tr>
+<td><strong>GDP</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Size and growth of the US economy.</td>
+<td>Quarterly</td>
+<td>Stronger growth supports the dollar.</td>
+</tr>
+<tr>
+<td><strong>Retail Sales</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Consumer spending.</td>
+<td>Monthly</td>
+<td>Strong spending means a strong economy, <span class="up">so the <span class="up">dollar goes up</span></span>.</td>
+</tr>
+<tr>
+<td><strong>ISM / PMI</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Surveys of business activity. Above 50 is expansion.</td>
+<td>Monthly</td>
+<td>Quick read on economic health.</td>
+</tr>
+<tr>
+<td><strong>Initial Jobless Claims</strong> <span class="badge Low">LOW</span></td>
+<td>New unemployment applications.</td>
+<td>Weekly (Thursday)</td>
+<td>Rising claims is weaker for the dollar. Smaller mover.</td>
+</tr>
+<tr>
+<td><strong>Treasury yields</strong> (not an event)</td>
+<td>Return on US government bonds.</td>
+<td>Constant</td>
+<td>USDJPY follows the US 10-year yield closely.</td>
+</tr>
+</tbody>
+</table>
+<h3>Japan (moves the yen)</h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>What it is</th>
+<th>Why it matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>BoJ rate decision and statement</strong> <span class="badge High">HIGH</span></td>
+<td>The Bank of Japan sets Japanese interest rates, roughly 8 times a year.</td>
+<td>Hawkish (raising or hinting at hikes) means <span class="dn">yen up and USDJPY down</span>. Staying loose means the <span class="up">yen weakens</span>.</td>
+</tr>
+<tr>
+<td><strong>BoJ Governor Ueda press conference</strong> <span class="badge High">HIGH</span></td>
+<td>Signals the future policy path.</td>
+<td>Comments on further tightening often move USDJPY several tens of pips.</td>
+</tr>
+<tr>
+<td><strong>Japan CPI / wage data</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Inflation and pay growth.</td>
+<td>Higher inflation or wages raises the odds of BoJ hikes, so the <span class="dn">yen goes up</span>.</td>
+</tr>
+<tr>
+<td><strong>Tankan survey</strong> <span class="badge Med">MEDIUM</span></td>
+<td>Quarterly business sentiment survey.</td>
+<td>Strong readings support the yen.</td>
+</tr>
+<tr>
+<td><strong>Ministry of Finance intervention</strong> <span class="badge High">HIGH</span></td>
+<td>Japan sells dollars and buys yen to stop a fast fall in the yen.</td>
+<td>Usually feared near <strong>160</strong>. It can drop USDJPY by hundreds of pips within minutes. Often comes without warning.</td>
+</tr>
+</tbody>
+</table>
+<h3>Market-wide</h3>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Risk-on / risk-off</strong></td>
+<td>Risk-on (stocks up) tends to weaken the yen, since traders borrow cheap yen to buy riskier assets. Risk-off (fear) tends to strengthen the yen, a "safe-haven" currency.</td>
+</tr>
+<tr>
+<td><strong>Hawkish / dovish</strong></td>
+<td>Hawkish = favours higher interest rates. Dovish = favours lower rates.</td>
+</tr>
+<tr>
+<td><strong>Rate differential</strong></td>
+<td>The gap between US and Japanese rates. A wide gap supports USDJPY.</td>
+</tr>
+</tbody>
+</table>
+<h3>Impact colours (Forex Factory)</h3>
+<p><span class="badge High">Red = high impact</span> (FOMC, NFP, CPI, BoJ decision). <span class="badge Med">Orange = medium</span>. <span class="badge Low">Yellow = low</span>.</p>
+<hr />
+<h2>Part 4 – A simple routine before trading</h2>
+<ol>
+<li>Open the calendar and filter for United States and Japan, medium and high impact.</li>
+<li>Note the times of red events today. Check the time zone shown matches yours.</li>
+<li>Glance at Session_Clock. Volatility is usually highest while <strong>London and New York overlap</strong>
+   (12:00–16:00 UTC by default), and Tokyo matters most for yen moves.</li>
+<li>Use HTF_Countdown to wait for a candle close before acting on a signal.</li>
+<li>Check Open_Positions so you know your total exposure before the news.</li>
+</ol>
+<hr />
+<h2>Part 5 – Examples: what you will see</h2>
+<p>All numbers below are made up to show how to read things. They are not real data or predictions.</p>
+<h3>5.1 What the indicators look like on the chart (top-right corner)</h3>
+<p><code>H1 29:13    H4 02:29:13    D1 14:29:13          &lt;- HTF_Countdown
+Sydney   closed opens in 11:30:00               &lt;- Session_Clock
+Tokyo    OPEN   +08:10:05  ends in 00:49:55
+London   closed opens in 00:49:55
+New York closed opens in 05:49:55
+Open positions: 2  P/L +12.40 USD               &lt;- Open_Positions
+USDJPY BUY  0.10 @ 158.123  +8.20
+EURUSD SELL 0.05 @ 1.0850   +4.20</code></p>
+<p>How to read it:
+- Tokyo has been open for 8 hours 10 minutes and closes in 49 minutes. London opens in the same 49 minutes,
+  so expect more activity soon. Tokyo and London lines turn dark red because they are inside the 15-minute window.
+- The H1 candle closes in 29 minutes. When the number gets to 05:00 or less, it turns blue.
+- You hold two positions and are up 12.40 USD in total.</p>
+<h3>5.2 Worked news examples</h3>
+<p><strong>Example A – NFP (jobs report), Friday 8:30 New York time</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Number</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Forecast</td>
+<td>+180,000 jobs</td>
+</tr>
+<tr>
+<td>Previous</td>
+<td>+150,000</td>
+</tr>
+<tr>
+<td>Actual</td>
+<td>+260,000</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Actual is far above forecast. This is a strong-economy surprise, so the market expects the Fed to keep rates higher.</li>
+<li><strong>Likely reaction:</strong> the <span class="up">dollar goes up</span>, USDJPY spikes up within seconds, then it may reverse or settle.</li>
+<li><strong>What you see on the chart:</strong> a very large green M1 or M5 candle at 8:30 New York time, then a wider spread.</li>
+<li>If Actual had been +90,000, the <span class="dn">dollar goes down</span> and you would see a large red candle.</li>
+</ul>
+<p><strong>Example B – CPI (inflation), 8:30 New York time</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Number</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Forecast</td>
+<td>0.3% month-on-month</td>
+</tr>
+<tr>
+<td>Actual</td>
+<td>0.5%</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Inflation is hotter than expected. Traders expect the Fed to be slower to cut rates, <span class="up">so the <span class="up">dollar goes up</span></span>.</li>
+<li>If Actual were 0.1%, inflation is cooler, rate cuts look more likely, and the <span class="dn">dollar goes down</span>.</li>
+</ul>
+<p><strong>Example C – FOMC rate decision, 2:00 pm New York time, press conference 2:30 pm</strong></p>
+<ul>
+<li>The Fed holds rates but says it expects fewer cuts. That is a hawkish message, <span class="up">so the <span class="up">dollar goes up</span></span>.</li>
+<li>You often see a first spike at 2:00 pm, then a second, sometimes opposite, move during the press conference.
+  The decision alone doesn't tell you the direction. The wording does.</li>
+</ul>
+<p><strong>Example D – BoJ decision / Ueda press conference</strong></p>
+<ul>
+<li>The BoJ keeps rates unchanged, but Ueda says more rate hikes are possible if inflation stays near 2%.</li>
+<li>That is a hawkish message for the yen, so the <span class="dn">yen goes up</span> and <span class="dn">USDJPY falls</span>.</li>
+<li>If Ueda sounds cautious, the <span class="up">yen weakens</span> and <span class="up">USDJPY rises</span>.</li>
+</ul>
+<p><strong>Example E – Intervention near 160</strong></p>
+<ul>
+<li>USDJPY climbs to 159.80 and Japanese officials warn about "excessive moves".</li>
+<li>A sudden tall red candle of 300+ pips can appear within minutes with no scheduled news. That is the Ministry of Finance
+  buying yen. Stop-losses and long positions get hit hard, so avoid chasing longs close to 160.</li>
+</ul>
+<h3>5.3 What to check on the calendar before each event</h3>
+<ol>
+<li>The <strong>time</strong> (convert it to your time zone) and the <strong>colour</strong> (red, orange or yellow).</li>
+<li><strong>Forecast vs Previous.</strong> The market is already pricing the forecast.</li>
+<li>After release: compare <strong>Actual with Forecast</strong>. A bigger gap means a bigger move.</li>
+<li>Wait for the first candle to close (use HTF_Countdown or an M1/M5 candle) before deciding. The first move is
+   often a spike that reverses.</li>
+</ol></body></html>

@@ -8,7 +8,7 @@
 #property indicator_chart_window
 #property indicator_plots 0
 
-input ENUM_BASE_CORNER InpCorner   = CORNER_LEFT_UPPER; // Corner
+input ENUM_BASE_CORNER InpCorner   = CORNER_RIGHT_UPPER; // Corner
 input int              InpX        = 10;                // X offset
 input int              InpY        = 20;                // Y offset
 input int              InpFontSize = 12;                // Font size
@@ -38,8 +38,8 @@ void MakeLabel(const int i)
       return;
    ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
    ObjectSetInteger(0, name, OBJPROP_CORNER,     InpCorner);
-   ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  InpX + i * InpFontSize * 11);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  InpX + (2 - i) * InpFontSize * 11);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  InpY);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   InpFontSize);
    ObjectSetInteger(0, name, OBJPROP_BACK,       false);
