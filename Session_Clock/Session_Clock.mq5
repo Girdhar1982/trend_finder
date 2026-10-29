@@ -1,22 +1,21 @@
 //+------------------------------------------------------------------+
 //| Session_Clock.mq5                                                |
 //| Shows which trading sessions are open and the time left until    |
-//| each one closes (or opens), at the top of the chart.             |
+//| each one closes (or opens), in its own pane below the chart.     |
 //| Forex : Sydney, Tokyo, London, New York (Mon-Fri only)           |
 //| Crypto: Asia, Europe, US (24/7)                                  |
 //| All session hours are UTC and editable; times use TimeGMT().     |
 //+------------------------------------------------------------------+
 #property copyright "Session Clock"
 #property version   "1.00"
-#property indicator_chart_window
+#property indicator_separate_window
 #property indicator_plots 0
 
 enum ENUM_MARKET { MARKET_AUTO, MARKET_FOREX, MARKET_CRYPTO };
 
 input ENUM_MARKET      InpMarket    = MARKET_AUTO;       // Market (Auto = by symbol path)
-input ENUM_BASE_CORNER InpCorner    = CORNER_RIGHT_UPPER; // Corner
 input int              InpX         = 10;                // X offset
-input int              InpY         = 45;                // Y offset (below HTF countdown)
+input int              InpY         = 6;                 // Y offset
 input int              InpFontSize  = 11;                // Font size
 input string           InpFont      = "Consolas";        // Font
 input color            InpOpenColor = clrDarkGreen;         // Colour: session open
@@ -34,13 +33,14 @@ input int InpAsiaStart = 0;  input int InpAsiaEnd = 8;
 input int InpEurStart  = 7;  input int InpEurEnd  = 16;
 input int InpUsStart   = 13; input int InpUsEnd   = 22;
 
-const string PREFIX = "SESCLK_";
+const string PREFIX = "SESCLKP_"; // differs from the old chart-window version so the two never share objects
 const int    MAXROWS = 5;
 
 string g_names[];
 int    g_start[];
 int    g_end[];
 bool   g_forex = true;
+int    g_subWin = 0;
 
 //+------------------------------------------------------------------+
 bool IsCryptoSymbol()
@@ -91,9 +91,9 @@ void SetRow(const int i, const string text, const color clr)
    const string name = PREFIX + IntegerToString(i);
    if(ObjectFind(0, name) < 0)
      {
-      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER,     InpCorner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_RIGHT_UPPER);
+      ObjectCreate(0, name, OBJ_LABEL, g_subWin, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_LEFT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  InpX);
       ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  InpY + i * (InpFontSize + 8));
       ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   InpFontSize);
@@ -109,6 +109,10 @@ void SetRow(const int i, const string text, const color clr)
 //+------------------------------------------------------------------+
 void Refresh()
   {
+   if(g_subWin <= 0)
+      g_subWin = ChartWindowFind();
+   if(g_subWin <= 0)
+      return;   // pane not attached yet; the next timer tick retries
    const datetime utc = TimeGMT();
    int row = 0;
 
@@ -157,6 +161,8 @@ int OnInit()
       AddSession("Europe", InpEurStart,  InpEurEnd);
       AddSession("US",     InpUsStart,   InpUsEnd);
      }
+   IndicatorSetString(INDICATOR_SHORTNAME, "Session Clock");
+   IndicatorSetInteger(INDICATOR_HEIGHT, ArraySize(g_names) * (InpFontSize + 8) + InpY * 2);
    EventSetTimer(1);
    Refresh();
    return INIT_SUCCEEDED;
