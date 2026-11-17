@@ -67,7 +67,7 @@ input int             InpLabelShift   = 3;              // Label offset to the r
 input int             InpRedrawSecs   = 5;              // Intrabar refresh of colours/labels (secs, 0 = new bar only)
 
 input group                  "Summary panel"
-input bool             InpPanel       = true;           // Show the R1 / S1 summary panel
+input bool             InpPanel       = false;          // Show the R1 / S1 summary panel
 input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER; // Which corner it hangs from
 input int              InpPanelX      = 12;             // Inset from that corner, X (pixels)
 input int              InpPanelY      = 22;             // Inset from that corner, Y (pixels)

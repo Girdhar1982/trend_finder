@@ -13,12 +13,12 @@ hr{border:0;border-top:1px solid #d9cfc4;margin:2rem 0}
 <span class="dn">red text</span> = pushes USDJPY down &nbsp;|&nbsp;
 Indicator text: <span class="c-green">dark green = open / profit</span>, <span class="c-gray">gray = closed</span>,
 <span class="c-dred">dark red = loss / opening or closing soon</span>, <span class="c-blue">blue = under 5 min left (countdown)</span></div>
-<p>Plain-English guide to the four on-chart indicators and to the main news events that move USDJPY.
+<p>Plain-English guide to the on-chart indicators and to the main news events that move USDJPY.
 Nothing here is trade advice.</p>
 <hr />
 <h2>Part 1 – Your chart indicators</h2>
-<p>All four draw text at the top-right of the chart and update every second. They don't draw lines or
-arrows and don't place trades.</p>
+<p>HTF_Countdown and Session_Clock draw text at the top-right of the chart and update every second.
+Trend_Lines draws lines on the price chart. None of them place trades.</p>
 <table>
 <thead>
 <tr>
@@ -39,9 +39,9 @@ arrows and don't place trades.</p>
 <td><code>Session_Clock</code></td>
 </tr>
 <tr>
-<td>Open_Positions</td>
-<td>How many positions you have open, with profit/loss</td>
-<td><code>Open_Positions</code></td>
+<td>Trend_Lines</td>
+<td>Automatic trend lines on any timeframe: blue support line through rising swing lows, red resistance line through falling swing highs</td>
+<td><code>Trend_Lines</code></td>
 </tr>
 </tbody>
 </table>
@@ -110,15 +110,16 @@ Example (closed): <code>Tokyo    closed opens in 05:10:00</code></p>
 </table>
 <p>London and New York shift by one hour when daylight saving changes. Update the inputs then.
 The crypto hours are a convention only.</p>
-<h3>Open_Positions</h3>
-<p>Example header: <code>Open positions: 3  P/L +12.40 USD</code>
-Example line: <code>USDJPY BUY  0.10 @ 158.123  +8.20</code></p>
+<h3>Trend_Lines</h3>
+<p>Draws up to two lines on the chart. Works on every timeframe, and the "Timeframe for trend lines" input can overlay another timeframe's lines (for example H4 lines on an M15 chart).</p>
 <ul>
-<li>Count header on or off, and the position list on or off, are separate inputs.</li>
-<li>"Max position lines" sets how many lines show (default 10). The rest show as "... +N more".</li>
-<li>"Count positions on" is either all symbols or only the chart's symbol.</li>
-<li>P/L is profit plus swap. It does not include commission.</li>
-<li><span class="c-green">Green = in profit</span>, <span class="c-dred">dark red = in loss</span>.</li>
+<li><span style="color:#1e90ff">Blue support line</span>: joins two swing lows where the later low is higher (uptrend). Runs on to the right.</li>
+<li><span style="color:#e5533d">Red resistance line</span>: joins two swing highs where the later high is lower (downtrend). Runs on to the right.</li>
+<li>A swing point only counts once it has 5 bars on each side ("Pivot strength"), so lines appear a few bars late but never move afterwards.</li>
+<li>A line is <strong>broken</strong> when a candle closes through it. Broken lines show as a short gray dotted line (input "Show broken lines") and raise an alert (input "Alert when a line breaks").</li>
+<li>If the market is not making higher lows or lower highs, that side shows no line.</li>
+<li>Lines are named <code>TL_Support</code> and <code>TL_Resist</code> (Ctrl+B, tick "List all").</li>
+<li>Reading it: a break of the line is context, not a trade signal by itself. Right after a news release, wait a candle or two before trusting a break.</li>
 </ul>
 <hr />
 <h2>Part 2 – Where to find the economic calendar</h2>
@@ -175,6 +176,12 @@ release time, so many traders stay out around high-impact events.</p>
 <td>How fast consumer prices rise (inflation).</td>
 <td>Monthly</td>
 <td>Higher than forecast means the Fed may raise or hold rates, <span class="up">so the <span class="up">dollar goes up</span></span>. Lower than forecast means the <span class="dn">dollar goes down</span>.</td>
+</tr>
+<tr>
+<td><strong>PPI (Producer Price Index)</strong> <span class="badge Med">MEDIUM</span></td>
+<td>How fast the prices producers receive are rising. It often runs ahead of consumer inflation (CPI). Watch <strong>core PPI</strong> (excludes food and energy) more than the headline, which swings with oil and food.</td>
+<td>Monthly, 8:30 New York time</td>
+<td>Higher than forecast means inflation pressure, so the Fed may hold or raise rates and the <span class="up">dollar goes up</span>. Lower than forecast means the <span class="dn">dollar goes down</span>. Same direction as CPI, but usually a smaller move. Check the previous month's revision too, as it can move price as much as the new number.</td>
 </tr>
 <tr>
 <td><strong>PCE price index</strong> <span class="badge Med">MEDIUM</span></td>
@@ -284,7 +291,7 @@ release time, so many traders stay out around high-impact events.</p>
 <li>Glance at Session_Clock. Volatility is usually highest while <strong>London and New York overlap</strong>
    (12:00–16:00 UTC by default), and Tokyo matters most for yen moves.</li>
 <li>Use HTF_Countdown to wait for a candle close before acting on a signal.</li>
-<li>Check Open_Positions so you know your total exposure before the news.</li>
+<li>Check your open positions in the MT5 Trade tab so you know your total exposure before the news.</li>
 </ol>
 <hr />
 <h2>Part 5 – Examples: what you will see</h2>
@@ -294,15 +301,11 @@ release time, so many traders stay out around high-impact events.</p>
 Sydney   closed opens in 11:30:00               &lt;- Session_Clock
 Tokyo    OPEN   +08:10:05  ends in 00:49:55
 London   closed opens in 00:49:55
-New York closed opens in 05:49:55
-Open positions: 2  P/L +12.40 USD               &lt;- Open_Positions
-USDJPY BUY  0.10 @ 158.123  +8.20
-EURUSD SELL 0.05 @ 1.0850   +4.20</code></p>
+New York closed opens in 05:49:55</code></p>
 <p>How to read it:
 - Tokyo has been open for 8 hours 10 minutes and closes in 49 minutes. London opens in the same 49 minutes,
   so expect more activity soon. Tokyo and London lines turn dark red because they are inside the 15-minute window.
-- The H1 candle closes in 29 minutes. When the number gets to 05:00 or less, it turns blue.
-- You hold two positions and are up 12.40 USD in total.</p>
+- The H1 candle closes in 29 minutes. When the number gets to 05:00 or less, it turns blue.</p>
 <h3>5.2 Worked news examples</h3>
 <p><strong>Example A – NFP (jobs report), Friday 8:30 New York time</strong></p>
 <table>

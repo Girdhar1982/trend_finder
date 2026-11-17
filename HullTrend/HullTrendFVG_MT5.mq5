@@ -98,7 +98,7 @@ input int             InpRightPad     = 8;              // Zone extension past t
 input int             InpRedrawSecs   = 5;              // Intrabar refresh (secs, 0 = new bar only)
 
 input group                  "Summary panel"
-input bool             InpPanel       = true;           // Show the summary panel
+input bool             InpPanel       = false;          // Show the summary panel
 input ENUM_BASE_CORNER InpPanelCorner = CORNER_LEFT_UPPER; // Which corner it hangs from
 input int              InpPanelX      = 12;             // Inset from that corner, X (pixels)
 input int              InpPanelY      = 22;             // Inset from that corner, Y (pixels)

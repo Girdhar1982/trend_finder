@@ -1,0 +1,7 @@
+watching USDJPY M5 (server time): sweep + reclaim of 24h,swing,PD,00-02,fig; min depth 0.5p, reclaim within 2 bar(s), DEEP >= 3.0p. Alerts only - no orders. Ctrl+C to stop.
+2026-11-16 12:00 USDJPY M5 RECLAIM BUY [LEVEL]: PDL 159.515 (swept 0.6p, same bar) | close 159.561, stop ref 159.499 (risk 6.2p) | stretch -0.77 | vol 0.7x
+2026-11-16 13:55 USDJPY M5 SWEEP BUY watch: price went below swing low 159.588 (+2.5p) but closed below it (159.570) - waiting for a close back above within 2 bar(s)
+2026-11-16 14:05 USDJPY M5 NO RECLAIM BUY: swing low 159.588 still beaten after 2 bar(s) - behaving like a breakout, BUY idea invalid
+2026-11-16 14:10 USDJPY M5 RECLAIM BUY [LEVEL]: PDL 159.515 (swept 1.1p, same bar) | close 159.519, stop ref 159.494 (risk 2.5p) | stretch -0.02 | vol 1.2x
+2026-11-16 14:15 USDJPY M5 SWEEP BUY watch: price went below 00-02 low 159.503 (+4.4p) but closed below it (159.484) - waiting for a close back above within 2 bar(s)
+2026-11-16 14:25 USDJPY M5 NO RECLAIM BUY: 00-02 low 159.503 still beaten after 2 bar(s) - behaving like a breakout, BUY idea invalid

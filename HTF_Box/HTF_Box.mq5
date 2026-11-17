@@ -13,8 +13,9 @@
 //+------------------------------------------------------------------+
 #property copyright "HTF Box"
 #property version   "2.00"
-#property indicator_chart_window
+#property indicator_separate_window
 #property indicator_plots 0
+#property indicator_height 120
 
 input int   InpCount      = 1;             // Number of HTF candles to box (1 = current only)
 input color InpBullColor  = clrDodgerBlue; // Box colour when HTF candle is bullish
@@ -23,9 +24,7 @@ input bool  InpFill       = false;         // Fill box
 input int   InpWidth      = 2;             // Border width
 input bool  InpMidline    = true;          // Draw 50% midline in each box
 input bool  InpPrevLevels = true;          // Extend previous HTF candle high/low to the right
-input bool  InpInfo       = true;          // Show trend / structure read-out
-input bool  InpStartMin   = false;         // Start with the read-out minimized (verdict line only)
-input ENUM_BASE_CORNER InpCorner = CORNER_LEFT_UPPER; // Read-out corner
+input bool  InpInfo       = false;         // Show trend / structure read-out
 input int   InpFontSize   = 10;            // Read-out font size
 input color InpPanelColor = C'18,22,32';   // Read-out panel background
 input int   InpRoomPct    = 60;            // Range below this % of average = "room to expand"
@@ -38,7 +37,6 @@ const string PREFIX = "HTFBOX_";
 
 datetime g_alertBar = 0;   // HTF bar already alerted
 bool     g_primed   = false; // first evaluation after attach never alerts
-bool     g_min      = InpStartMin; // read-out minimized to the verdict line
 
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES BoxTF()
@@ -148,78 +146,49 @@ string Structure(const double hiA, const double loA, const double hiB, const dou
   }
 
 //+------------------------------------------------------------------+
-// Solid background so the read-out stays legible over candles. Must be created before the labels.
+// Read-out lives in this indicator's own sub-window (boxes/levels stay on the main chart, window 0)
 void Panel()
   {
    const string name = PREFIX + "PANEL";
-   const bool right = (InpCorner == CORNER_RIGHT_UPPER || InpCorner == CORNER_RIGHT_LOWER);
+   const int win = ChartWindowFind(0, "HTF Bias");
+   if(win <= 0)   // never draw the read-out on the main chart
+      return;
    if(ObjectFind(0, name) < 0)
      {
-      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, win, 0, 0);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
       ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
       ObjectSetInteger(0, name, OBJPROP_BACK, false);
      }
-   ObjectSetInteger(0, name, OBJPROP_CORNER, InpCorner);
-   ObjectSetInteger(0, name, OBJPROP_ANCHOR, right ? ANCHOR_RIGHT_UPPER : ANCHOR_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 5);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 12);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE, (int)(72 * InpFontSize * 0.9));
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, (g_min ? 1 : 6) * (InpFontSize + 6) + 16);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 0);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 0);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, 900);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, 130);
    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpPanelColor);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clrDimGray);
-
-   // Minimize / restore button in the panel's top outer corner; created after the panel so it sits on top
-   const string btn = PREFIX + "BTN";
-   const int w = (int)(72 * InpFontSize * 0.9);
-   if(ObjectFind(0, btn) < 0)
-     {
-      ObjectCreate(0, btn, OBJ_BUTTON, 0, 0, 0);
-      ObjectSetInteger(0, btn, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, btn, OBJPROP_HIDDEN, true);
-      ObjectSetString(0,  btn, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, btn, OBJPROP_BGCOLOR, clrDimGray);
-      ObjectSetInteger(0, btn, OBJPROP_COLOR, clrWhite);
-      ObjectSetInteger(0, btn, OBJPROP_BORDER_COLOR, clrDimGray);
-     }
-   ObjectSetInteger(0, btn, OBJPROP_CORNER, InpCorner);
-   ObjectSetInteger(0, btn, OBJPROP_ANCHOR, right ? ANCHOR_RIGHT_UPPER : ANCHOR_LEFT_UPPER);
-   ObjectSetInteger(0, btn, OBJPROP_XDISTANCE, right ? 9 : 5 + w - 22);
-   ObjectSetInteger(0, btn, OBJPROP_YDISTANCE, 16);
-   ObjectSetInteger(0, btn, OBJPROP_XSIZE, 18);
-   ObjectSetInteger(0, btn, OBJPROP_YSIZE, 18);
-   ObjectSetInteger(0, btn, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0,  btn, OBJPROP_TEXT, g_min ? "+" : "-");
-   ObjectSetInteger(0, btn, OBJPROP_STATE, false);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpPanelColor);
   }
 
 //+------------------------------------------------------------------+
-void Label(const string name, int row, const string text, const color clr)
+void Label(const string name, const int row, const string text, const color clr)
   {
-   if(g_min)   // minimized: keep only the verdict line, on the first row
-     {
-      if(name != PREFIX + "I4")
-        {
-         ObjectDelete(0, name);
-         return;
-        }
-      row = 0;
-     }
+   const int win = ChartWindowFind(0, "HTF Bias");
+   if(win <= 0)   // never draw the read-out on the main chart
+      return;
    if(ObjectFind(0, name) < 0)
      {
-      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER, InpCorner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,
-                       (InpCorner == CORNER_RIGHT_UPPER || InpCorner == CORNER_RIGHT_LOWER) ?
-                       ANCHOR_RIGHT_UPPER : ANCHOR_LEFT_UPPER);
+      ObjectCreate(0, name, OBJ_LABEL, win, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
       ObjectSetString(0,  name, OBJPROP_FONT, "Consolas");
      }
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 18 + row * (InpFontSize + 6));
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 8);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 6 + row * (InpFontSize + 6));
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetString(0,  name, OBJPROP_TEXT, text);
@@ -420,6 +389,7 @@ void Draw()
 //+------------------------------------------------------------------+
 int OnInit()
   {
+   IndicatorSetString(INDICATOR_SHORTNAME, "HTF Bias");
    Clear();
    return INIT_SUCCEEDED;
   }
@@ -428,16 +398,6 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    Clear();
-  }
-
-//+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
-  {
-   if(id == CHARTEVENT_OBJECT_CLICK && sparam == PREFIX + "BTN")
-     {
-      g_min = !g_min;
-      Draw();
-     }
   }
 
 //+------------------------------------------------------------------+

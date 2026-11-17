@@ -1,0 +1,20 @@
+2026-11-13 02:05 USDJPY M5 RECLAIM SELL [DEEP]: 00-02 high 159.890 (swept 3.0p, same bar) | close 159.869, stop ref 159.930 (risk 6.1p) | stretch -0.13 | vol 4.5x
+2026-11-13 03:15 USDJPY M5 RECLAIM SELL [LEVEL]: 00-02 high 159.890 (swept 2.9p, same bar) | close 159.883, stop ref 159.929 (risk 4.6p) | stretch -0.26 | vol 1.2x
+2026-11-13 04:15 USDJPY M5 RECLAIM SELL [LEVEL]: 00-02 high 159.890 (swept 1.5p, same bar) | close 159.873, stop ref 159.915 (risk 4.2p) | stretch -0.34 | vol 0.9x
+2026-11-13 05:15 USDJPY M5 SWEEP SELL watch: price went above 00-02 high 159.890 (+6.0p) but closed above it (159.949) - waiting for a close back below within 2 bar(s)
+2026-11-13 05:25 USDJPY M5 NO RECLAIM SELL: 00-02 high 159.890 still beaten after 2 bar(s) - behaving like a breakout, SELL idea invalid
+2026-11-13 06:25 USDJPY M5 SWEEP SELL watch: price went above 00-02 high 159.890 (+5.5p) but closed above it (159.921) - waiting for a close back below within 2 bar(s)
+2026-11-13 06:35 USDJPY M5 NO RECLAIM SELL: 00-02 high 159.890 still beaten after 2 bar(s) - behaving like a breakout, SELL idea invalid
+2026-11-13 07:30 USDJPY M5 NO RECLAIM SELL: 00-02 high 159.890 still beaten after 2 bar(s) - behaving like a breakout, SELL idea invalid
+2026-11-13 07:35 USDJPY M5 SWEEP SELL watch: price went above 00-02 high 159.890 (+9.0p) but closed above it (159.969) - waiting for a close back below within 2 bar(s)
+2026-11-13 07:45 USDJPY M5 RECLAIM SELL [DEEP]: 160.00 160.000 (swept 3.2p, same bar) | close 159.951, stop ref 160.042 (risk 9.1p) | stretch -0.01 | vol 1.7x
+2026-11-13 07:45 USDJPY M5 RECLAIM SELL [DEEP]: 160.00 160.000 (swept 3.2p, same bar) | close 159.951, stop ref 160.042 (risk 9.1p) | stretch -0.01 | vol 1.7x
+2026-11-13 07:45 USDJPY M5 NO RECLAIM SELL: 00-02 high 159.890 still beaten after 2 bar(s) - behaving like a breakout, SELL idea invalid
+2026-11-13 08:10 USDJPY M5 SWEEP SELL watch: price went above 24h high 160.046 (+3.9p), PDH 160.046 (+3.9p) but closed above it (160.056) - waiting for a close back below within 2 bar(s)
+2026-11-13 08:10 USDJPY M5 SWEEP SELL watch: price went above 24h high 160.046 (+3.9p), PDH 160.046 (+3.9p) but closed above it (160.056) - waiting for a close back below within 2 bar(s)
+2026-11-16 12:00 USDJPY M5 RECLAIM BUY [LEVEL]: PDL 159.515 (swept 0.6p, same bar) | close 159.561, stop ref 159.499 (risk 6.2p) | stretch -0.77 | vol 0.7x
+2026-11-16 13:55 USDJPY M5 SWEEP BUY watch: price went below swing low 159.588 (+2.5p) but closed below it (159.570) - waiting for a close back above within 2 bar(s)
+2026-11-16 14:05 USDJPY M5 NO RECLAIM BUY: swing low 159.588 still beaten after 2 bar(s) - behaving like a breakout, BUY idea invalid
+2026-11-16 14:10 USDJPY M5 RECLAIM BUY [LEVEL]: PDL 159.515 (swept 1.1p, same bar) | close 159.519, stop ref 159.494 (risk 2.5p) | stretch -0.02 | vol 1.2x
+2026-11-16 14:15 USDJPY M5 SWEEP BUY watch: price went below 00-02 low 159.503 (+4.4p) but closed below it (159.484) - waiting for a close back above within 2 bar(s)
+2026-11-16 14:25 USDJPY M5 NO RECLAIM BUY: 00-02 low 159.503 still beaten after 2 bar(s) - behaving like a breakout, BUY idea invalid
